@@ -1,0 +1,108 @@
+{{- $ctx := . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "faro.frontend.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/version: {{ .Values.images.frontend.tag | default .Chart.AppVersion | quote }}
+spec:
+  # Aquí sí se replica: el portal no tiene estado ni temporizadores. Es Next.js en modo standalone
+  # sirviendo la SPA, y toda la lógica vive detrás del API.
+  replicas: {{ .Values.frontend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "faro.selectorLabels" (dict "ctx" $ctx "component" "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "faro.labels" . | nindent 8 }}
+        app.kubernetes.io/component: frontend
+      {{- with .Values.frontend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # ⚠️ El mismo secreto de descarga que el backend: los dos paquetes de ghcr.io son privados.
+      # Declararlo solo en uno de los dos Deployments es un error frecuente y deja media instalación
+      # arrancada, lo que hace pensar que el problema es del otro componente.
+      {{- with (include "faro.imagePullSecretName" .) }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      # El portal no habla con el API server: se queda con la cuenta `default` y sin token montado.
+      automountServiceAccountToken: false
+      securityContext:
+        # La imagen crea el usuario `nextjs` con uid/gid 1001 y declara USER nextjs.
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          # Vacío = la appVersion del chart. El tag de la imagen va SIN `v` (ver backend-deployment).
+          image: "{{ .Values.images.frontend.repository }}:{{ .Values.images.frontend.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.images.frontend.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ include "faro.frontend.port" . }}
+              protocol: TCP
+          # ⚠️ El portal NO recibe la URL del API por entorno, y es deliberado.
+          #
+          # NEXT_PUBLIC_API_URL es una variable de tiempo de BUILD: Next la sustituye textualmente
+          # en el bundle del navegador, así que ponerla aquí no haría nada. La imagen se construye
+          # SIN definirla justamente para que el cliente caiga a la base relativa `/api`
+          # (src/lib/api/client.ts), o sea el mismo origen desde el que se sirvió el portal.
+          #
+          # Eso es lo que hace que el Ingress de host único de este chart funcione, y es también por
+          # lo que no se puede partir en dos dominios sin tocar las dos imágenes.
+          {{- with .Values.frontend.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # ⚠️ readOnlyRootFilesystem se queda en false a propósito, y es lo único de este chart
+            # que se relaja sin haberlo verificado: el servidor standalone de Next escribe en
+            # `.next/cache` (caché de `fetch` del servidor) y no se ha comprobado en un cluster real
+            # que ésa sea la ÚNICA ruta que necesita. Ponerlo en true sin comprobarlo cambia un
+            # riesgo teórico por una caída real.
+            #
+            # Para cerrarlo: arrancar con readOnlyRootFilesystem: true + emptyDir en /app/.next/cache
+            # y /tmp, y mirar si el pod sirve el portal completo. Si sí, es el default correcto.
+            readOnlyRootFilesystem: false
+      {{- with .Values.frontend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

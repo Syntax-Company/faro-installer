@@ -1,0 +1,80 @@
+{{- /*
+Configuración NO sensible del backend, montada con `envFrom`.
+
+⚠️ Este ConfigMap se ha ENCOGIDO, y lo que ya no está es tan importante como lo que queda. Estas
+variables las RETIRÓ el backend: ponerlas aquí no tendría ningún efecto, solo daría la impresión de
+haber configurado algo.
+
+  FARO_AUTH_PROVIDER, FARO_AUTH_{GITHUB,GOOGLE,OIDC}_*   el proveedor de identidad y sus
+                                                          credenciales los captura el asistente y
+                                                          viven en la base de datos (el secreto,
+                                                          cifrado en el almacén de credenciales)
+  FARO_GITOPS_REPO_URL / _TOKEN / _BRANCH                 idem: los valida y guarda el asistente
+  FARO_BUILD_REGISTRY                                     idem
+  FARO_DEPLOY_BASE_DOMAIN                                 idem
+
+Las cuatro se configuran desde la propia interfaz en el primer arranque. El backend ya no se detiene
+sin ellas: arranca, dice qué le falta (`GET /platform/setup-status`) y bloquea solo la operación
+concreta que las necesita, con un 422 que nombra la causa.
+
+Lo que queda aquí es exactamente lo que NO puede venir de la base de datos:
+
+  · lo que da acceso a la propia base de datos (círculo cerrado);
+  · lo que lee el contenedor servlet antes de que exista contexto de aplicación (puerto, cabeceras);
+  · la URL pública, que el Ingress necesita ANTES de que Faro exista para poder enrutarla;
+  · el namespace de builds, que tiene que coincidir con el RBAC que crea este mismo chart.
+
+Las ~55 variables de tuning (FARO_BUILD_* de recursos, FARO_EXEC_*, FARO_CLUSTERS_*, FARO_TLS_*,
+FARO_TEARDOWN_*, FARO_LOGS_*, FARO_SESSION_*) siguen con su default en application.yaml.
+`backend.extraEnv` sobreescribe cualquiera sin tocar el chart.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "faro.fullname" . }}-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+data:
+  # --- Base de datos -------------------------------------------------------------------------
+  DB_HOST: {{ include "faro.databaseHost" . | quote }}
+  DB_PORT: {{ .Values.database.port | quote }}
+  # ⚠️ Constante, no un value. El nombre de la base es siempre `faro`: una pregunta menos y un valor
+  # menos que se puede escribir mal. Un nombre equivocado no falla al instalar, falla al arrancar
+  # con un error de conexión que no dice qué pasó. Coincide con el default del backend.
+  DB_NAME: {{ include "faro.database.name" . | quote }}
+  DB_USERNAME: {{ .Values.database.username | quote }}
+
+  # --- Servidor ------------------------------------------------------------------------------
+  FARO_SERVER_PORT: {{ include "faro.backend.port" . | quote }}
+  # ⚠️ `framework` porque SIEMPRE hay un Ingress delante que termina TLS y habla HTTP con el pod.
+  # Sin esto Spring construye el redirect_uri de OAuth2 con http:// (el esquema de la conexión que
+  # ve, no el que usó el navegador), el proveedor responde `redirect_uri_mismatch` y NADIE puede
+  # entrar; y además request.isSecure() es false, así que el cookie de sesión nunca se marca Secure.
+  FARO_FORWARD_HEADERS: "framework"
+
+  # --- Frontend ------------------------------------------------------------------------------
+  # Destino del redirect post-login, y la única URL que hay que saber al instalar: el Ingress tiene
+  # que enrutar este host antes de que Faro exista, así que no puede venir de la base de datos.
+  # Derivada de global.domain: el operador no la escribe, porque escribirla dos veces (aquí y en el
+  # Ingress) es exactamente como se rompe el login.
+  #
+  # FARO_CORS_ALLOWED_ORIGINS no se declara a propósito: su default en application.yaml ES
+  # frontend-url ya resuelto, y con host único no hay ninguna llamada de origen cruzado.
+  FARO_FRONTEND_URL: {{ include "faro.url" . | quote }}
+
+  # --- Builds (kaniko) -----------------------------------------------------------------------
+  # ⚠️ MISMA fuente que el Namespace, el Role y el RoleBinding (build.namespace). Si esta variable
+  # y esos tres objetos apuntan a namespaces distintos, la instalación queda verde y el primer
+  # build falla con un 403 que no nombra la causa. Por eso el namespace sigue aquí y no en la base
+  # de datos: es lo único de builds que este chart tiene que mantener sincronizado consigo mismo.
+  FARO_BUILD_NAMESPACE: {{ .Values.build.namespace | quote }}
+
+  # --- Deploy --------------------------------------------------------------------------------
+  # ⚠️ Namespace de Argo CD EN CADA CLUSTER DE WORKLOAD. El chart no crea nada ahí ni pide permisos.
+  FARO_ARGOCD_NAMESPACE: {{ .Values.argocd.namespace | quote }}
+  FARO_ARGOCD_PROJECT: {{ .Values.argocd.project | quote }}
+  # Con qué ClusterIssuer emite Faro los certificados de las apps que despliega. Vacío = las apps se
+  # sirven por HTTP plano, sin regresión.
+  FARO_CERT_MANAGER_ISSUER: {{ .Values.certManager.issuer | quote }}

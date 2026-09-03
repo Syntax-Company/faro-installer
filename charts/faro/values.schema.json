@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "values del chart de Faro",
+  "description": "Valida la FORMA de los values antes de renderizar: tipos, estructura y los pocos campos que solo admiten un juego cerrado de valores. Lo que NO valida aquí es la OBLIGATORIEDAD: los campos obligatorios se exigen en las plantillas con `required`, porque ahí el mensaje puede explicar por que hace falta el valor y que rompe si falta, y ese mensaje es la mitad del valor de este chart. Un `required` de JSON Schema solo diria 'global.domain is required'. ⚠️ Los bloques `auth`, `gitops`, `apps` y `build.registry` DESAPARECIERON en plans/059 F6: esa configuracion la captura el asistente de primer arranque y vive en la base de datos. El backend retiro esas variables de entorno, asi que declararlas aqui no tendria ningun efecto.",
+  "type": "object",
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+
+    "global": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Host unico de Faro: portal y API bajo el mismo dominio."
+        }
+      }
+    },
+
+
+    "images": {
+      "type": "object",
+      "properties": {
+        "backend": { "$ref": "#/definitions/image" },
+        "frontend": { "$ref": "#/definitions/image" }
+      }
+    },
+
+    "imagePullSecret": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["", "create", "existing", "none"],
+          "description": "create | existing | none. Los paquetes de ghcr.io/syntax-company son privados."
+        },
+        "existingSecret": { "type": "string" },
+        "registry": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" }
+      }
+    },
+
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretName": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "certManager": {
+      "type": "object",
+      "properties": {
+        "issuer": { "type": "string" }
+      }
+    },
+
+    "database": {
+      "type": "object",
+      "description": "⚠️ NO admite `name`: el nombre de la base es siempre `faro`, fijo en el chart (plans/059 F6). Un value menos que se puede escribir mal, y un nombre equivocado no falla al instalar sino al arrancar.",
+      "properties": {
+        "deploy": { "type": "boolean" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "username": { "type": "string", "minLength": 1 },
+        "password": { "type": "string" },
+        "image": { "$ref": "#/definitions/image" },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$" },
+            "storageClassName": { "type": "string" },
+            "accessMode": {
+              "type": "string",
+              "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadWriteOncePod"]
+            }
+          }
+        },
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
+      }
+    },
+
+    "credentialKey": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "description": "Base64 de EXACTAMENTE 32 bytes (openssl rand -base64 32). El backend valida los tres casos de error y dice cual es."
+        },
+        "existingSecret": { "type": "string" },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "bootstrapToken": {
+      "type": "object",
+      "description": "El acceso inicial de primer arranque, en el MISMO Secret que la llave maestra. Vacio = lo genera el chart; un helm upgrade NO lo rota (lookup). `disabled: true` lo retira, que es la higiene cuando el asistente termina.",
+      "properties": {
+        "value": { "type": "string" },
+        "disabled": { "type": "boolean" }
+      }
+    },
+
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "existingSecret": { "type": "string" }
+      }
+    },
+
+    "build": {
+      "type": "object",
+      "description": "⚠️ Ya NO admite `registry`: el registro donde Faro publica lo que construye lo configura el asistente de primer arranque y vive en la base de datos (plans/059 F6). Solo queda el namespace, porque el chart crea en el un Role y un RoleBinding.",
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "description": "Mismo valor para el Namespace, el Role, el RoleBinding y FARO_BUILD_NAMESPACE."
+        },
+        "createNamespace": { "type": "boolean" }
+      }
+    },
+
+    "argocd": {
+      "type": "object",
+      "description": "Argo CD EN LOS CLUSTERS DE WORKLOAD, no en el cluster de control donde se instala Faro. El chart no crea nada ahi y el backend no necesita permisos en ese namespace: habla con esos clusters usando el kubeconfig cifrado que guarda en su BD. Es un valor global — se asume el mismo nombre en todos los clusters que se registren.",
+      "properties": {
+        "namespace": { "type": "string", "minLength": 1 },
+        "project": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "backend": {
+      "type": "object",
+      "description": "⚠️ No hay `replicas`: es 1 fijo en la plantilla, invariante de correccion.",
+      "properties": {
+        "replicas": {
+          "const": 1,
+          "description": "INVARIANTE DE CORRECCION: el backend tiene cinco procesos @Scheduled sin bloqueo distribuido y dos replicas los ejecutan duplicados. La plantilla lo fija en 1; este `const` existe para que un --set backend.replicas=2 FALLE en vez de ser ignorado en silencio."
+        },
+        "resources": { "type": "object" },
+        "startupProbe": {
+          "type": "object",
+          "properties": {
+            "periodSeconds": { "type": "integer", "minimum": 1 },
+            "failureThreshold": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "podAnnotations": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "extraEnv": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+
+    "frontend": {
+      "type": "object",
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "resources": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "extraEnv": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "annotations": { "type": "object" }
+      }
+    }
+  },
+
+  "definitions": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    }
+  }
+}

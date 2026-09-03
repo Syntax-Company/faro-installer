@@ -1,0 +1,53 @@
+# Configuración de esta instalación de Faro, generada por install.sh.
+#
+# NO contiene ningún secreto: la llave maestra y el token de acceso inicial viven en el Secret
+# «faro-bootstrap» del namespace faro, la contraseña de la base en «faro-app», y
+# las credenciales de descarga en «faro-registry». Un `helm upgrade` con este fichero los
+# recupera del cluster sin que haya que volver a tenerlos a mano.
+#
+# Guárdalo: es lo único que hace falta para actualizar.
+#
+#   helm upgrade faro <chart> -n faro -f faro-values.yaml
+#
+# ⚠️ Lo que NO está aquí y no es un olvido: el proveedor de identidad, el registro donde Faro publica
+# lo que construye, el repositorio de GitOps y el dominio base de las apps. Eso se configura en el
+# asistente de primer arranque y vive en la base de datos; ponerlo aquí no tendría ningún efecto.
+
+global:
+  domain: "faro.localtest.me"
+
+images:
+  backend:
+    tag: "0.0.4"
+  frontend:
+    tag: "0.0.4"
+
+# El chart crea el Secret dockerconfigjson con las credenciales que van en el fichero de secretos.
+imagePullSecret:
+  mode: create
+  registry: ghcr.io
+
+ingress:
+  className: "traefik"
+  tls:
+    enabled: false
+    secretName: "faro-tls"
+
+certManager:
+  issuer: ""
+
+database:
+  deploy: true
+  username: "faro"
+  persistence:
+    enabled: true
+    size: "20Gi"
+    storageClassName: ""
+
+build:
+  namespace: "faro-builds"
+  createNamespace: true
+
+argocd:
+  namespace: "argocd"
+  project: default

@@ -1,0 +1,40 @@
+{{- $ctx := . -}}
+{{- /*
+Los dos Services son ClusterIP: nada de esto se expone directamente. El único punto de entrada es el
+Ingress de host único (ingress.yaml), que es lo que hace que el portal y la API compartan origen.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "faro.backend.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ include "faro.backend.port" . }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "faro.selectorLabels" (dict "ctx" $ctx "component" "backend") | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "faro.frontend.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ include "faro.frontend.port" . }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "faro.selectorLabels" (dict "ctx" $ctx "component" "frontend") | nindent 4 }}

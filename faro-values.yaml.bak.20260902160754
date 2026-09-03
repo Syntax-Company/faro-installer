@@ -1,0 +1,68 @@
+# Configuración de esta instalación de Faro, generada por install.sh.
+#
+# NO contiene ningún secreto: la contraseña de la base de datos, el client secret del proveedor de
+# identidad y el token de GitOps viven en el Secret «faro-app» del namespace faro; la
+# llave maestra en «faro-credential-key», y las credenciales del registro en «faro-ghcr».
+#
+# Guárdalo: es lo único que hace falta para actualizar.
+#
+#   helm upgrade faro <chart> -n faro -f faro-values.yaml
+
+global:
+  domain: "test.com"
+
+apps:
+  baseDomain: "mi.empresa.com"
+
+images:
+  backend:
+    tag: "0.0.0"
+  frontend:
+    tag: "0.0.0"
+
+imagePullSecret:
+  mode: existing
+  existingSecret: "faro-ghcr"
+
+ingress:
+  className: "traefik"
+  tls:
+    enabled: false
+    secretName: "faro-tls"
+
+certManager:
+  issuer: ""
+
+auth:
+  provider: github
+  clientId: "Ov23liIs9zIlBuneKsXm"
+
+secrets:
+  existingSecret: "faro-app"
+
+credentialKey:
+  existingSecret: "faro-credential-key"
+  key: FARO_CREDENTIAL_KEY
+
+database:
+  deploy: true
+  name: "faro"
+  username: "faro"
+  persistence:
+    enabled: true
+    size: "20Gi"
+    storageClassName: ""
+
+build:
+  registry: "faro"
+  registryScheme: https
+  namespace: "faro-builds"
+  createNamespace: true
+
+argocd:
+  namespace: "argocd"
+  project: default
+
+gitops:
+  repoUrl: ""
+  branch: "main"

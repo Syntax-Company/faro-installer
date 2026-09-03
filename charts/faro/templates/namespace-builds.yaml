@@ -1,0 +1,38 @@
+{{- /*
+Namespace donde Faro crea el Secret de git, el Secret del registry y el Job de kaniko de cada build.
+
+Viene de `deploy/rbac/namespace-builds.yaml` del repo del backend, donde el nombre estaba CABLEADO a
+`faro-builds` — y estaba cableado en tres archivos a la vez (aquí, en el Role y en el RoleBinding),
+además de en la variable FARO_BUILD_NAMESPACE que lee el backend. Ahora sale de `build.namespace` y
+esos cuatro puntos leen del mismo sitio.
+
+⚠️ Por qué importa: los permisos viven EN el namespace, no siguen a la configuración. Si el
+Namespace/Role/RoleBinding quedan en `faro-builds` y el backend lee `FARO_BUILD_NAMESPACE=otro`,
+Faro lanza los Jobs donde no tiene ningún permiso. La instalación queda verde y el fallo aparece en
+el PRIMER BUILD, como un 403.
+
+⚠️ Lo crea el instalador, no Faro. La alternativa —darle a Faro permiso para crearlo al vuelo— se
+descarta por un motivo estructural, no de gusto: un Namespace es un recurso de CLUSTER, así que ese
+permiso solo cabe en un ClusterRole ("puede crear cualquier namespace"), y no compra nada. El
+RoleBinding que concede los permisos de build es un objeto NAMESPACED y tiene que vivir DENTRO de
+este namespace, así que quien aplica el RBAC ya está obligado a crearlo primero. Un Faro capaz de
+crear namespaces se crearía uno en el que no tendría ningún permiso, y el build fallaría igual — con
+un 403 en vez de un 404.
+
+`build.createNamespace: false` para una instalación donde el namespace ya existe (hoy la
+documentación del backend manda crearlo a mano antes de instalar). Si existe y esto queda en true,
+`helm install` aborta con "already exists".
+
+⚠️ Este Namespace es un recurso de CLUSTER y forma parte de la release: un `helm uninstall` se lo
+lleva, con los builds en curso dentro. Es aceptable —ahí solo viven Jobs de kaniko y Secrets
+regenerables— pero conviene saberlo antes de desinstalar con builds corriendo.
+*/ -}}
+{{- if .Values.build.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.build.namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: builds
+{{- end }}

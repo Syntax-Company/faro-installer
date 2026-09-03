@@ -1,0 +1,220 @@
+{{- $ctx := . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "faro.backend.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: {{ .Values.images.backend.tag | default .Chart.AppVersion | quote }}
+spec:
+  # ⚠️⚠️ replicas: 1 — INVARIANTE DE CORRECCIÓN, no una preferencia de tamaño. Está aquí fijo y NO
+  # es un value a propósito: un default se cambia sin leer nada, una constante obliga a abrir esta
+  # plantilla y encontrarse el porqué.
+  #
+  # El backend tiene cinco componentes @Scheduled —reconciliador de despliegues, de ejecuciones, de
+  # desmantelado, vigilante de certificados y recolector— y NO hay ningún mecanismo de bloqueo
+  # distribuido en el código ni en sus dependencias. Los procesos de fondo de Spring corren en CADA
+  # instancia, así que con dos réplicas:
+  #
+  #   · dos desmantelados compitiendo por borrar los mismos recursos,
+  #   · dos reconciliadores tocando el mismo Application de Argo,
+  #   · y en general cada tarea de fondo ejecutándose el doble de veces.
+  #
+  # Subir la réplica NO da alta disponibilidad: produce operaciones duplicadas. Si el backend se
+  # queda corto, la salida es VERTICAL (backend.resources), no horizontal.
+  #
+  # Cuando exista un bloqueo distribuido sobre Postgres, esto pasa a ser un value normal. Hoy no.
+  replicas: 1
+  # Recreate y no RollingUpdate, por lo mismo: durante un rolling update conviven la réplica vieja y
+  # la nueva, y eso son dos juegos de temporizadores corriendo a la vez — exactamente lo que
+  # replicas: 1 evita. Un control plane single-writer prefiere unos segundos de corte a una ventana
+  # de operaciones duplicadas.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "faro.selectorLabels" (dict "ctx" $ctx "component" "backend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "faro.labels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+      annotations:
+        # Reinicia el pod cuando cambia la configuración: sin esto, un `helm upgrade` que solo toque
+        # el ConfigMap o el Secret deja al backend corriendo con los valores viejos y la instalación
+        # parece aplicada cuando no lo está.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret-app.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.backend.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with (include "faro.imagePullSecretName" .) }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      # ⚠️ Sin esto, Kubernetes monta la cuenta `default` del namespace —que no puede nada— y Faro
+      # arranca sin ningún síntoma hasta el primer build, que falla con un 403.
+      serviceAccountName: {{ include "faro.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      securityContext:
+        # La imagen declara USER 10001:10001. Se repite aquí porque `runAsNonRoot` sin `runAsUser`
+        # obliga a que el uid de la imagen sea numérico, y porque un PodSecurity `restricted` exige
+        # que esté explícito.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.database.deploy }}
+      initContainers:
+        # Espera a que Postgres acepte conexiones. No es cosmético: el backend NO arranca sin base
+        # de datos, y sin esta espera el primer arranque entra en CrashLoopBackOff mientras el
+        # StatefulSet todavía se está creando — un fallo transitorio con pinta de error de
+        # configuración. Un `sleep` no vale: no se sabe cuánto tarda un PVC en enlazarse.
+        #
+        # Solo con database.deploy=true: con una base externa se asume que ya está en pie, y meter
+        # aquí un pg_isready obligaría a arrastrar la imagen de Postgres en instalaciones que no la
+        # despliegan.
+        - name: wait-for-database
+          image: "{{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}"
+          imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME"; do
+                echo "esperando a postgres en $DB_HOST:$DB_PORT..."
+                sleep 2
+              done
+          envFrom:
+            - configMapRef:
+                name: {{ include "faro.fullname" . }}-env
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+      {{- end }}
+      containers:
+        - name: backend
+          # Vacío = la appVersion del chart. ⚠️ El tag de la IMAGEN no lleva `v` (el de git sí):
+          # `0.0.0`, no `v0.0.0`. Copiar el de git da un ImagePullBackOff con `manifest unknown`.
+          image: "{{ .Values.images.backend.repository }}:{{ .Values.images.backend.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ include "faro.backend.port" . }}
+              protocol: TCP
+          envFrom:
+            # Las ~10 variables no sensibles que el chart deriva o exige. El resto de la
+            # configuración la captura el asistente y vive en la base de datos.
+            - configMapRef:
+                name: {{ include "faro.fullname" . }}-env
+            # Solo DB_PASSWORD. El client secret del proveedor de identidad y el token de GitOps ya
+            # no están aquí: los guarda cifrados el asistente en la tabla `credential`.
+            - secretRef:
+                name: {{ include "faro.appSecretName" . }}
+          env:
+            # ⚠️ Las dos cosas que tienen que existir antes de que Faro pueda hacer nada, desde su
+            # PROPIO Secret. Referenciadas por `secretKeyRef` y no por `envFrom` porque ese Secret
+            # tiene una política de retención distinta a la del resto (resource-policy: keep) y
+            # puede ser uno externo, creado fuera del ciclo de vida del chart.
+            - name: FARO_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "faro.bootstrapSecretName" . }}
+                  key: {{ .Values.credentialKey.key }}
+            # El acceso inicial: con esto se entra la PRIMERA vez, antes de que exista proveedor de
+            # identidad, y se completa el asistente. `optional: true` porque una instalación ya
+            # configurada NO debe llevarlo — se retira, y entonces la clave no está en el Secret.
+            # Sin `optional`, retirarlo dejaría el pod en CreateContainerConfigError.
+            - name: FARO_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "faro.bootstrapSecretName" . }}
+                  key: FARO_BOOTSTRAP_TOKEN
+                  optional: true
+            {{- with .Values.backend.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # ⚠️ Las tres sondas cuelgan del context-path /api: el backend sirve TODO —actuator
+          # incluido— bajo ese prefijo. Apuntarlas a /actuator/... devuelve 404, el kubelet lo lee
+          # como "no arranca" y el pod entra en un bucle de reinicios que no tiene nada que ver con
+          # la aplicación.
+          #
+          # El cuerpo de /actuator/health es permitAll (el kubelet llama sin credenciales) y no
+          # revela nada: la respuesta es exactamente {"status":"UP"}.
+          startupProbe:
+            # ⚠️ La sonda que evita el falso positivo más caro de esta instalación. Flyway ejecuta
+            # TODAS las migraciones antes de que el contexto de Spring esté listo, y en un arranque
+            # en frío contra una base vacía eso tarda. Sin este margen, la liveness mata el pod a
+            # mitad de la migración, el siguiente arranque la vuelve a empezar, y el resultado es un
+            # CrashLoopBackOff permanente que parece un error de configuración.
+            httpGet:
+              path: {{ include "faro.backend.contextPath" . }}/actuator/health/readiness
+              port: http
+            periodSeconds: {{ .Values.backend.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.backend.startupProbe.failureThreshold }}
+          livenessProbe:
+            # LIVENESS = "el proceso sigue en pie" -> reiniciar. El grupo `liveness` del backend
+            # excluye la base de datos DELIBERADAMENTE: si Postgres parpadea, una liveness que la
+            # incluyera reiniciaría el control plane en bucle y convertiría una incidencia de base
+            # de datos en una caída total.
+            httpGet:
+              path: {{ include "faro.backend.contextPath" . }}/actuator/health/liveness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            # READINESS = "puedo atender tráfico" -> sacar del Service. Aquí la base de datos SÍ
+            # entra: sin ella Faro no puede servir una petición útil, y lo correcto es dejar de
+            # recibirlas, no morir. Cuando Postgres vuelve, el pod se reincorpora solo.
+            httpGet:
+              path: {{ include "faro.backend.contextPath" . }}/actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # La imagen solo escribe en /tmp (la JVM: hsperfdata, ficheros temporales de Tomcat),
+            # que se monta abajo como emptyDir. Todo lo demás es de solo lectura.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      # 30s es el default y basta: la ENTRYPOINT de la imagen hace `exec java`, así que la JVM es
+      # PID 1 y recibe el SIGTERM del kubelet directamente.
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

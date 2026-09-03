@@ -1,0 +1,336 @@
+# ---------------------------------------------------------------------------------------------
+# values.yaml — la configuración de UNA instalación de Faro.
+#
+# ⚠️ ESTE ARCHIVO ENCOGIÓ, y lo que ya no está importa tanto como lo que queda.
+#
+# El proveedor de identidad y sus credenciales, el registro de imágenes de plataforma, el
+# repositorio de GitOps con su token y el dominio base de las apps YA NO SE CONFIGURAN AQUÍ: los
+# captura el asistente de primer arranque, desde la propia interfaz, y viven en la base de datos.
+# El backend retiró esas variables de entorno — ponerlas en el chart no tiene ningún efecto, solo
+# daría la impresión de haber configurado algo.
+#
+# Lo que queda es lo que NO puede venir de la base de datos:
+#
+#   · lo que da acceso a la propia base de datos          -> círculo cerrado
+#   · la llave maestra                                    -> descifra la base; guardarla ahí no tiene sentido
+#   · el token de acceso inicial                          -> es lo que permite entrar antes de que haya nada
+#   · el dominio en que se sirve Faro                     -> el Ingress lo necesita antes de que Faro exista
+#
+# Más los hechos del cluster que el instalador detecta y ofrece: la IngressClass y el ClusterIssuer.
+#
+# REGLA QUE SIGUE EN PIE: un default que no sirva en una instalación real se deja VACÍO. Un valor de
+# desarrollo heredado no falla al instalar; falla semanas después, con un síntoma que no nombra la
+# causa. Un value vacío falla AL RENDERIZAR, con una frase que dice qué falta y por qué.
+#
+# Los obligatorios en una instalación nueva:
+#   global.domain      database.password      credentialKey.value      imagePullSecret.mode
+#   (+ database.host si database.deploy=false)
+# ---------------------------------------------------------------------------------------------
+
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  # ⚠️ OBLIGATORIO. El host ÚNICO de Faro: el portal y la API viven aquí, bajo el mismo dominio.
+  # Ej: faro.tuempresa.com
+  #
+  # Es la única URL que hay que saber al instalar, y por eso no se pudo mover al asistente: el
+  # Ingress tiene que enrutar este host ANTES de que Faro exista, así que Faro no puede ser quien
+  # lo diga. De aquí sale FARO_FRONTEND_URL y el `host` del Ingress.
+  #
+  # ⚠️ El DNS de este nombre tiene que apuntar a la IP del controlador de Ingress ANTES de instalar,
+  # o el certificado HTTP-01 de cert-manager no se emite.
+  #
+  # ⚠️ NO confundir con el dominio base de las APPS (el comodín). Ése ya no está aquí: lo pide el
+  # asistente, porque Faro sí puede preguntarlo una vez está en pie.
+  domain: ""
+
+# ---------------------------------------------------------------------------------------------
+# Imágenes
+# ---------------------------------------------------------------------------------------------
+images:
+  backend:
+    repository: ghcr.io/syntax-company/faro-backend
+    # Vacío = la `appVersion` del chart. Se rellena solo para fijar otra versión, o para desacoplar
+    # backend y frontend, que se publican por separado.
+    #
+    # ⚠️ SIN la `v`. El tag de git es `v0.0.0` y el de la imagen es `0.0.0`: el workflow normaliza
+    # con `${RAW#[vV]}`. Copiar el de git da un ImagePullBackOff con `manifest unknown`, que se lee
+    # como un problema de credenciales y no como una letra de más.
+    tag: ""
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: ghcr.io/syntax-company/faro-frontend
+    tag: ""
+    pullPolicy: IfNotPresent
+
+# Secreto de descarga de las imágenes DE FARO (no el registro donde Faro publica lo que construye:
+# ése lo configura el asistente).
+#
+# ⚠️ Los paquetes de ghcr.io/syntax-company son PRIVADOS. Esto lo CREA el chart cuando se le dan las
+# credenciales — antes había que hacerlo a mano con `kubectl create secret docker-registry`, y
+# olvidarlo dejaba la instalación a medias con un ImagePullBackOff y un `denied` que no menciona en
+# ningún sitio el comando que falta.
+#
+# El bloque es condicional entero: o se crea y se referencia en los dos Deployments, o ninguna de
+# las dos cosas. Un Secret creado y no referenciado es peor que no tenerlo: parece configurado.
+imagePullSecret:
+  # ⚠️ OBLIGATORIO. Uno de:
+  #   create   — el chart crea el Secret dockerconfigjson con las credenciales de abajo.
+  #   existing — ya existe un Secret en el namespace de Faro; se referencia por `existingSecret`.
+  #   none     — las imágenes están replicadas en un registro que el cluster lee sin credenciales.
+  mode: ""
+  existingSecret: ""
+  registry: ghcr.io
+  # Usuario de GitHub (o el bot/cuenta de servicio de la organización).
+  username: ""
+  # PAT clásico con el scope `read:packages`.
+  password: ""
+
+# ---------------------------------------------------------------------------------------------
+# Ingress — el host único
+# ---------------------------------------------------------------------------------------------
+#
+# ⚠️ El routing NO es cosmético, es el contrato entre los dos despliegues:
+#
+#   /api  -> backend   (el backend sirve bajo `server.servlet.context-path: /api`; el prefijo es
+#                       parte de su ruta, NO se reescribe)
+#   /     -> frontend
+#
+# El portal llama a la API con base RELATIVA `/api` (horneada en la imagen), así que los dos TIENEN
+# que salir por el mismo origen. Con dos hostnames distintos el login no carga: la cookie de sesión
+# no fija `SameSite=None; Secure` y el navegador la bloquea en los XHR.
+ingress:
+  enabled: true
+  # ⚠️ Vacío = la IngressClass por DEFECTO del cluster. Si no hay ninguna marcada como default, el
+  # Ingress se crea y nunca obtiene dirección. Sácala de `kubectl get ingressclass`.
+  className: ""
+  annotations: {}
+  tls:
+    enabled: true
+    secretName: faro-tls
+
+certManager:
+  # Nombre del ClusterIssuer (ej. letsencrypt-prod).
+  #
+  # ⚠️ Un solo value para DOS usos, y cada uno cae en un CLUSTER DISTINTO. Es el mismo nombre porque
+  # se asume la misma instalación de cert-manager en todos, pero hay que tenerlo en los dos:
+  #
+  #   1. anotación del Ingress de Faro  -> en el cluster de CONTROL, emite el certificado del portal.
+  #   2. FARO_CERT_MANAGER_ISSUER       -> en cada cluster de WORKLOAD, es el issuer con el que Faro
+  #                                        anota los Ingress de las apps que despliega.
+  #
+  # Vacío = sin TLS automático en ninguno de los dos, sin regresión.
+  #
+  # ⚠️ Requiere cert-manager >= 1.15. Por debajo es PEOR que no tenerlo: el Secret del certificado
+  # nace sin etiquetar y queda huérfano en el cluster para siempre al desmantelar una app.
+  issuer: ""
+
+# ---------------------------------------------------------------------------------------------
+# Base de datos (PostgreSQL)
+# ---------------------------------------------------------------------------------------------
+#
+# Faro migra su propio esquema con Flyway al arrancar y lo VALIDA. El chart solo garantiza que la
+# base exista y sea alcanzable; nadie toca el esquema a mano.
+#
+# ⚠️ El usuario necesita poder ejecutar `CREATE EXTENSION IF NOT EXISTS "pgcrypto"` (lo hace la
+# migración V1). En un Postgres gestionado (RDS, Cloud SQL) suele estar permitido; si no, hay que
+# crear la extensión a mano ANTES de instalar.
+#
+# ⚠️ NO hay `database.name`: el nombre es SIEMPRE `faro`, fijo en el chart. Una pregunta menos y un
+# valor menos que se puede escribir mal — un nombre equivocado no falla al instalar, falla al
+# arrancar con un error de conexión que no dice qué pasó.
+database:
+  # true  = el chart despliega un StatefulSet de Postgres con volumen persistente.
+  # false = base externa; hay que rellenar `host`.
+  deploy: true
+
+  # ⚠️ OBLIGATORIO si deploy=false (DB_HOST no tiene default en el backend). Con deploy=true se
+  # ignora: el chart apunta al Service que él mismo crea.
+  host: ""
+  port: 5432
+  username: faro
+  # ⚠️ OBLIGATORIO en una instalación nueva. Con deploy=true es también la contraseña con la que se
+  # inicializa el Postgres del chart.
+  #
+  # En un `helm upgrade` se puede omitir: el chart recupera la que ya está en el Secret (lookup), y
+  # por eso el fichero de valores que deja el instalador no lleva ningún secreto dentro.
+  password: ""
+
+  # --- Solo con deploy=true --------------------------------------------------------------------
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  persistence:
+    # ⚠️ Sin PVC, un reinicio del pod se lleva TODA la instalación: apps, entornos, conexiones,
+    # clusters registrados y lo que el asistente haya configurado.
+    #
+    # false monta un emptyDir: SOLO para una demo que se va a tirar.
+    enabled: true
+    size: 20Gi
+    # Vacío = la StorageClass por defecto del cluster. Si no hay ninguna default, el PVC se queda en
+    # Pending y Postgres nunca arranca.
+    storageClassName: ""
+    accessMode: ReadWriteOnce
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------------------------
+# ⚠️⚠️ EL SECRETO DE ARRANQUE — la llave maestra y el acceso inicial
+# ---------------------------------------------------------------------------------------------
+#
+# Las dos cosas que tienen que existir antes de que Faro pueda hacer nada, y ninguna se puede pedir
+# por la interfaz porque la interfaz todavía no es alcanzable. Van en el MISMO Secret, con
+# `helm.sh/resource-policy: keep`: un `helm uninstall` no se las lleva.
+
+credentialKey:
+  # ⚠️ OBLIGATORIO en una instalación nueva (o usa `existingSecret`).
+  #
+  # FARO_CREDENTIAL_KEY cifra (AES-256) TODO lo que Faro custodia: los tokens de acceso a
+  # repositorios, los kubeconfig de los clusters, las credenciales del proveedor de identidad que
+  # capture el asistente y los secretos de las aplicaciones.
+  #
+  #   · Si se PIERDE, ese material es irrecuperable. No hay copia ni rescate: la base de datos sigue
+  #     viva y completamente ilegible.
+  #   · Si se CAMBIA, lo ya cifrado deja de poder leerse.
+  #
+  # Generar: openssl rand -base64 32   (exactamente 32 bytes en base64; el backend valida los tres
+  # casos —falta, no es base64, no mide 32— y el mensaje dice cuál es).
+  #
+  # ⚠️ FORMA: 44 caracteres en base64 y acaba en '=', y se comprueba. El token de acceso inicial de
+  # aquí abajo son 40 hexadecimales, sin '='. Se imprimen seguidos al terminar de instalar y
+  # confundirlos es el error fácil, así que pasar uno donde va el otro aborta con un mensaje que
+  # dice cuál es cuál.
+  #
+  # ⚠️ El chart NUNCA la genera. En un `helm upgrade` se puede omitir y se recupera la del cluster;
+  # si no la encuentra, FALLA con un mensaje en vez de inventar una nueva — generarla en un
+  # `helm template` o un `--dry-run`, donde no hay acceso al cluster, produciría un manifiesto con
+  # una llave distinta de la real, y aplicarlo es justo la catástrofe que se quiere evitar.
+  value: ""
+  # Nombre de un Secret ya existente con las dos claves (FARO_CREDENTIAL_KEY y, si se quiere acceso
+  # inicial, FARO_BOOTSTRAP_TOKEN). Es la opción correcta en producción: el Secret lo crea el
+  # operador desde su gestor de secretos, Helm nunca lo posee y la llave no pasa por ningún values
+  # ni por el historial de releases.
+  existingSecret: ""
+  # Clave de la llave maestra dentro de ese Secret.
+  key: FARO_CREDENTIAL_KEY
+
+bootstrapToken:
+  # El acceso inicial de primer arranque. Rompe el círculo "hace falta el proveedor de identidad
+  # para entrar, y entrar para configurarlo": se canja en POST /platform/onboarding/session por una
+  # sesión limitada a los endpoints del asistente.
+  #
+  # Vacío = lo GENERA el chart. No hace falta tocarlo; el instalador lo imprime al terminar y
+  # también sale en las notas de `helm install`.
+  #
+  # ⚠️ FORMA: 40 caracteres hexadecimales en minúscula (`openssl rand -hex 20`), y se comprueba. La
+  # llave maestra de aquí al lado son 44 en base64 acabados en '='. Son dos valores distintos del
+  # MISMO Secret, se imprimen seguidos, y pasar uno donde va el otro aborta la instalación con un
+  # mensaje que dice cuál es cuál — antes de que llegue al cluster.
+  #
+  # ⚠️ Un `helm upgrade` NO lo rota: el chart recupera el que ya está en el Secret. Sin eso, cada
+  # actualización cambiaría el token y quien lo tuviera apuntado se quedaría fuera.
+  #
+  # ⚠️ Un `helm install` SÍ genera otro, aunque se encuentre el Secret de una instalación anterior.
+  # Ese Secret lleva `resource-policy: keep` y sobrevive al uninstall: heredar su token sería abrir
+  # el asistente de una instalación nueva con un acceso que ya circuló. La llave maestra, en el
+  # mismo Secret, sí se hereda — perderla es irreversible y el token está hecho para morirse.
+  value: ""
+  # true retira el acceso inicial (deja la clave vacía, que es como el backend entiende "sin
+  # token"). Es la higiene recomendada cuando el asistente termina.
+  #
+  # No es urgente: el backend lo cierra solo en cuanto un login real por el proveedor de identidad
+  # funciona, y caduca a las 24h del primer arranque de la instalación aunque nadie complete nada.
+  # Poner `value: ""` NO lo retira — el lookup lo recuperaría; para retirarlo hace falta esto.
+  disabled: false
+
+secrets:
+  # Si se rellena, el chart NO crea el Secret de la app y usa éste con `envFrom`. Tiene que contener
+  # la clave con el NOMBRE EXACTO de la variable de entorno: DB_PASSWORD.
+  existingSecret: ""
+
+# ---------------------------------------------------------------------------------------------
+# Builds (kaniko)
+# ---------------------------------------------------------------------------------------------
+#
+# ⚠️ Aquí ya NO está `build.registry`: el registro donde Faro publica lo que construye lo configura
+# el asistente y vive en la base de datos. Lo que queda es solo el namespace, y sigue aquí por un
+# motivo concreto: el chart crea en él un Role y un RoleBinding, así que es lo único de builds que
+# el chart tiene que mantener sincronizado consigo mismo.
+build:
+  # ⚠️ UN SOLO valor para dos cosas que tienen que coincidir o los permisos quedan en el namespace
+  # equivocado: el Namespace + Role + RoleBinding que crea el chart, y la variable
+  # FARO_BUILD_NAMESPACE que lee el backend. El desajuste no avisa: la instalación queda verde y el
+  # primer build falla con un 403.
+  namespace: faro-builds
+  # false si el namespace ya existe. Si existe y esto queda en true, `helm install` aborta.
+  createNamespace: true
+
+# Argo CD. ⚠️ Es el namespace de Argo EN CADA CLUSTER DE WORKLOAD, no en el cluster de Faro: el
+# chart no crea NADA ahí y el backend no necesita permisos en él (habla con esos clusters usando el
+# kubeconfig cifrado que guarda en su BD). Se deja configurable porque el backend lo lee para
+# construir los Application y para sondear el RBAC de Argo.
+argocd:
+  namespace: argocd
+  project: default
+
+# ---------------------------------------------------------------------------------------------
+# Workloads
+# ---------------------------------------------------------------------------------------------
+backend:
+  # ⚠️ `replicas` NO está aquí, y no es un olvido. Es 1, fijo en la plantilla
+  # (templates/backend-deployment.yaml), porque es un invariante de CORRECCIÓN: el backend tiene
+  # cinco procesos programados sin bloqueo distribuido y dos réplicas los ejecutan por duplicado.
+  # Un default se cambia sin leer nada; una constante obliga a abrir la plantilla y encontrarse el
+  # porqué. Si se queda corto, la salida es vertical, no horizontal.
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      # ⚠️ Sin límite de CPU a propósito: el backend tiene 5 temporizadores de fondo y el throttling
+      # en un control plane se manifiesta como reconciliadores lentos, no como un error.
+      # El límite de MEMORIA sí, y además dimensiona el heap: la imagen usa -XX:MaxRAMPercentage=75,
+      # así que con 2Gi de límite el heap es ~1,5Gi.
+      memory: 2Gi
+  # Flyway corre todas las migraciones antes de que el contexto esté listo. En un arranque en frío
+  # contra una base vacía eso tarda, y una readiness impaciente produce un bucle de reinicios que
+  # parece un fallo de configuración y es solo una migración en curso.
+  startupProbe:
+    periodSeconds: 10
+    failureThreshold: 30   # 5 minutos de margen
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Variables extra o sobreescrituras de las ~55 de tuning que el chart no expone.
+  # Ej: [{ name: FARO_BOOTSTRAP_TTL, value: "48h" }]
+  extraEnv: []
+
+frontend:
+  # Aquí sí se replica: el portal no tiene estado ni temporizadores.
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+
+serviceAccount:
+  # Anotaciones para el ServiceAccount del backend (p. ej. IRSA en EKS).
+  annotations: {}

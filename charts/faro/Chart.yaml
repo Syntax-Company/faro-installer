@@ -1,0 +1,43 @@
+apiVersion: v2
+name: faro
+description: Faro — plataforma interna de despliegue (backend, portal y su base de datos) sobre un cluster de Kubernetes ya existente.
+type: application
+
+# Versión DEL CHART (de la instalación), no del producto. Sube con cada cambio del chart aunque
+# las imágenes no se muevan: son ciclos de vida distintos y por eso el chart vive en su propio repo.
+version: 0.1.0
+
+# Versión de Faro que instala este chart por defecto: es el default de `images.backend.tag` y de
+# `images.frontend.tag`, que se pueden sobreescribir por separado si alguna vez van desacopladas.
+#
+# ⚠️ SIN la `v`, y la diferencia importa. El workflow de publicación de ambos repos normaliza con
+# `VERSION="${RAW#[vV]}"` y publica DOS cosas con nombres distintos:
+#
+#     tag de git      v0.0.0     <- lo que ves en `git tag`
+#     tag de imagen    0.0.0     <- lo que va aquí
+#
+# Copiar el tag de git tal cual da un ImagePullBackOff con un `manifest unknown`, que se lee como
+# "falta el secreto de descarga" y no como "sobra una letra".
+#
+# El CI publica también `sha-<short>` para trazabilidad. NO existe `latest`, a propósito: una
+# instalación tiene que poder decir qué versión corre, y un tag móvil cambia bajo sus pies sin que
+# nada lo registre.
+appVersion: "0.0.0"
+
+home: https://github.com/Syntax-Company/faro-installer
+sources:
+  - https://github.com/Syntax-Company/faro-installer
+  - https://github.com/Syntax-Company/faro-backend
+  - https://github.com/Syntax-Company/faro-frontend
+
+keywords:
+  - faro
+  - platform
+  - internal-developer-platform
+
+annotations:
+  # Kubernetes ≥ 1.24: el código del backend asume que el controlador puebla el token del
+  # ServiceAccount de forma asíncrona, que es el comportamiento a partir de esa versión.
+  # networking.k8s.io/v1 Ingress y policy/v1 también piden 1.19+/1.21+.
+  artifacthub.io/prerelease: "true"
+kubeVersion: ">=1.24.0-0"

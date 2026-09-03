@@ -1,0 +1,87 @@
+{{- /*
+Permisos de Faro en el namespace de builds.
+
+Viene de `deploy/rbac/role-builds.yaml` del repo del backend. Los DOS valores que allí estaban
+cableados salen aquí de la configuración:
+
+  · el namespace de builds  -> .Values.build.namespace  (mismo valor que FARO_BUILD_NAMESPACE)
+  · el namespace de Faro    -> .Release.Namespace       (el `subjects.namespace` del RoleBinding)
+
+Los verbos NO se tocan: están derivados de las cinco llamadas que el backend hace con su cliente
+LOCAL, todas en `Fabric8KubernetesJobRunner`, que es su único consumidor.
+
+Alcance: un Role NAMESPACED, no un ClusterRole. Con esta identidad Faro no sale de este namespace.
+Todo lo que hace contra los clusters de workload —los Application de Argo, los Secrets, los logs,
+los Jobs puntuales— pasa por clientes efímeros construidos desde el kubeconfig cifrado de cada
+cluster registrado, y NO necesita ningún permiso local. Si alguien concede aquí un ClusterRole "por
+si acaso", está abriendo acceso a algo que no se usa.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "faro.fullname" . }}-builds
+  namespace: {{ .Values.build.namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: builds
+rules:
+  # Fabric8KubernetesJobRunner: create (lanzar el build) y get (consultar la fase).
+  #
+  # SIN 'delete': los Job terminados los borra el TTL controller de Kubernetes, no Faro
+  # (faro.build.ttl-seconds-after-finished). SIN 'list' ni 'watch': Faro consulta cada Job POR
+  # NOMBRE —el nombre es determinista— y nunca enumera el namespace.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get"]
+
+  # ⚠️ El permiso MÁS AMPLIO del conjunto, y no por elección. Es también el que SIEMPRE se olvida.
+  #
+  # `jobs().withName(...).getLog()` no es una operación de la API: fabric8 la resuelve por debajo
+  # LISTANDO los pods del namespace por el label selector del Job y leyendo el log del que
+  # encuentra. RBAC no sabe expresar "los pods de este Job" —no hay filtro por label ni por
+  # propietario, y resourceNames no sirve porque el nombre del pod lo inventa Kubernetes—, así que
+  # 'list' sobre pods alcanza a TODOS los pods del namespace.
+  #
+  # Se concede porque acota bien igualmente: aquí solo viven los builds de Faro. Si algún día este
+  # namespace se comparte con otra cosa, éste es el permiso a revisar.
+  #
+  # ⚠️ Omitirlo NO rompe el build: rompe solo la LECTURA DE LOGS. Y ese es el síntoma que se lee
+  # como "el build se colgó" y cuesta una tarde de depuración.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # El Secret con el PAT de git y el dockerconfigjson del registry, ambos con Server-Side Apply.
+  # Un apply es un PATCH, y el API server autoriza 'patch' para actualizar y 'create' para el caso
+  # en que el objeto aún no exista: por eso van los dos y no hace falta 'update'.
+  #
+  # SIN 'get': el apply no lee antes de escribir. Es deliberado — Faro nunca necesita LEER un
+  # Secret de este namespace, y no concederlo significa que esta identidad no puede recuperar el
+  # PAT que ella misma escribió. SIN 'delete': los Secrets son por-app y se reutilizan en cada
+  # build, no se acumulan.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "faro.fullname" . }}-builds
+  namespace: {{ .Values.build.namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: builds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "faro.fullname" . }}-builds
+subjects:
+  # El backend corre en el namespace de la release y actúa sobre el de builds: el RoleBinding vive
+  # en el namespace DONDE SE CONCEDE el permiso, y apunta a la cuenta del namespace donde corre
+  # quien lo recibe. Son namespaces distintos y por eso `namespace` es obligatorio aquí.
+  - kind: ServiceAccount
+    name: {{ include "faro.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

@@ -1,0 +1,14 @@
+# Cosas que no deben acabar dentro del paquete .tgz del chart.
+.git/
+.gitignore
+*.tgz
+.DS_Store
+*.swp
+*.bak
+
+# Values reales de una instalación: llevan la contraseña de la base, el client secret del IdP y
+# —peor— la llave maestra. Nunca dentro del chart empaquetado.
+# (helm ignora estos patrones; no admite negaciones, por eso el ejemplo vive en la raíz del repo
+#  y no dentro del chart.)
+mis-values.yaml
+*-values.yaml

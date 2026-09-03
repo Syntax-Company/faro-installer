@@ -1,0 +1,156 @@
+{{- $ctx := . -}}
+{{- /*
+PostgreSQL desplegado por el chart. Condicional: con `database.deploy=false` no se renderiza nada de
+este archivo y el backend apunta a `database.host`, la base que el cliente ya tenga.
+
+Por qué un StatefulSet propio y no un subchart de terceros: la base de Faro son METADATOS (apps,
+entornos, despliegues, builds), no una base de producción que afinar, y una dependencia externa en
+el camino crítico de la instalación es la clase de cosa que rompe una demo en casa del cliente.
+
+⚠️ LO QUE ESTO ARREGLA respecto a la prueba manual: allí Postgres corría en un contenedor de Docker
+sin volumen. Aquí hay PVC. Sin él, un reinicio del pod se lleva la instalación entera — y como las
+credenciales de la tabla `credential` están cifradas con la llave maestra, ni siquiera un backup de
+la llave sirve de nada si la base desapareció.
+
+⚠️ El PVC lo crea `volumeClaimTemplates`, así que NO lo borra un `helm uninstall` ni la eliminación
+del StatefulSet: los datos sobreviven. Borrarlos es un `kubectl delete pvc` explícito.
+*/ -}}
+{{- if .Values.database.deploy }}
+apiVersion: v1
+kind: Service
+metadata:
+  # Headless: el StatefulSet necesita identidad de red estable por pod. El backend se conecta a este
+  # mismo nombre (DB_HOST lo deriva el helper faro.databaseHost).
+  name: {{ include "faro.database.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: postgresql
+      port: {{ .Values.database.port }}
+      targetPort: postgresql
+      protocol: TCP
+  selector:
+    {{- include "faro.selectorLabels" (dict "ctx" $ctx "component" "database") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "faro.database.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  serviceName: {{ include "faro.database.fullname" . }}
+  # Una sola instancia. Este chart no monta Postgres en alta disponibilidad: si eso hace falta, la
+  # respuesta es `database.deploy=false` y una base gestionada, no replicar esto a mano.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "faro.selectorLabels" (dict "ctx" $ctx "component" "database") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "faro.labels" . | nindent 8 }}
+        app.kubernetes.io/component: database
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # Solo fsGroup, y a propósito: la imagen oficial de Postgres arranca como root y baja a
+        # `postgres` (uid 999) con gosu en su entrypoint, que es donde ajusta permisos e inicializa
+        # el directorio de datos. Forzar runAsNonRoot/runAsUser aquí rompe esa inicialización.
+        # fsGroup 999 es lo que hace que el volumen le pertenezca al grupo correcto.
+        fsGroup: 999
+      containers:
+        - name: postgresql
+          image: "{{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}"
+          imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          env:
+            # Constante `faro`, la misma que lee el backend: el nombre de la base dejó de ser un
+            # value para que no pueda escribirse mal en un solo sitio de los dos.
+            - name: POSTGRES_DB
+              value: {{ include "faro.database.name" . | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.database.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                # La MISMA clave que lee el backend: una sola fuente de verdad para la contraseña.
+                # Si se declararan por separado, un cambio en una y no en la otra deja al backend
+                # sin poder entrar en su propia base.
+                secretKeyRef:
+                  name: {{ include "faro.appSecretName" . }}
+                  key: DB_PASSWORD
+            # ⚠️ Subdirectorio, no la raíz del volumen. La imagen se niega a inicializar un
+            # directorio de datos que no esté vacío, y un PVC recién creado suele traer `lost+found`.
+            # Sin esto, el pod falla con "directory exists but is not empty" en el primer arranque.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.database.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      {{- with .Values.database.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.database.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.database.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not .Values.database.persistence.enabled }}
+      volumes:
+        # ⚠️ SIN PERSISTENCIA. Un reinicio del pod borra la instalación entera. Solo para una demo
+        # que se va a tirar; NOTES.txt lo repite después de cada instalación.
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.database.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "faro.labels" . | nindent 10 }}
+          app.kubernetes.io/component: database
+      spec:
+        accessModes:
+          - {{ .Values.database.persistence.accessMode }}
+        {{- if .Values.database.persistence.storageClassName }}
+        storageClassName: {{ .Values.database.persistence.storageClassName | quote }}
+        {{- else }}
+        # Sin storageClassName = la StorageClass por DEFECTO del cluster. ⚠️ Si el cluster no tiene
+        # ninguna marcada como default, el PVC se queda en Pending para siempre y el pod nunca
+        # arranca: el síntoma es un StatefulSet a 0/1 sin ningún error en los logs del contenedor.
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.database.persistence.size | quote }}
+  {{- end }}
+{{- end }}

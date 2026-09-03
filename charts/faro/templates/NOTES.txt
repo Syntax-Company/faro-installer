@@ -1,0 +1,131 @@
+
+  Faro {{ .Values.images.backend.tag | default .Chart.AppVersion }} — release "{{ .Release.Name }}" en el namespace {{ .Release.Namespace }}.
+
+  {{ include "faro.url" . }}
+
+{{- if not .Values.credentialKey.existingSecret }}
+{{- if not .Values.bootstrapToken.disabled }}
+
+  ─────────────────────────────────────────────────────────────────────────────
+  1. ENTRA CON EL ACCESO INICIAL Y COMPLETA EL ASISTENTE
+
+       {{ include "faro.url" . }}/setup
+
+     Token de acceso inicial:
+{{ if .Values.bootstrapToken.value }}
+       {{ .Values.bootstrapToken.value }}
+{{- else }}
+       kubectl get secret {{ include "faro.bootstrapSecretName" . }} -n {{ .Release.Namespace }} \
+         -o jsonpath='{.data.FARO_BOOTSTRAP_TOKEN}' | base64 -d
+
+     (Lo generó el chart, así que hay que leerlo del Secret: estas notas se
+     componen ANTES de aplicar los manifiestos y en ese momento todavía no
+     existe. El instalador sí lo imprime, porque lo genera él.)
+{{- end }}
+
+     Todavía no hay proveedor de identidad, así que no hay forma de hacer login:
+     este token es la única puerta, y da una sesión limitada a configurar. El
+     asistente pide lo que ya no pregunta el instalador — el proveedor de
+     identidad con sus credenciales, el registro de imágenes, el repositorio de
+     GitOps y el dominio base de las apps — y los valida contra el servicio real
+     antes de guardarlos.
+
+     ⚠️ La URL de retorno (redirect URI) que hay que registrar en tu proveedor
+        de identidad la muestra el propio asistente, en su pantalla. No puede
+        decirla el instalador: depende de qué proveedor elijas, y eso se elige
+        ahí.
+
+     ⚠️ Retira el token cuando termines:
+
+          helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --set bootstrapToken.disabled=true
+
+        No es urgente — el backend lo cierra solo en cuanto un login real por el
+        proveedor funcione, y caduca a las 24h del primer arranque aunque nadie
+        complete el asistente — pero es la higiene, y el arranque deja un WARN
+        mientras siga puesto con la puerta ya cerrada.
+  ─────────────────────────────────────────────────────────────────────────────
+{{- end }}
+
+  ─────────────────────────────────────────────────────────────────────────────
+  2. ⚠️⚠️ GUARDA LA LLAVE MAESTRA FUERA DEL CLUSTER. AHORA.
+
+     Cifra TODAS las credenciales que Faro guarda: los tokens de acceso a
+     repositorios, los kubeconfig de los clusters, las credenciales del
+     proveedor de identidad que capture el asistente y los secretos de las
+     aplicaciones.
+
+     SI SE PIERDE, ESE MATERIAL ES IRRECUPERABLE. No hay copia ni rescate: la
+     base de datos sigue viva y completamente ilegible.
+
+       kubectl get secret {{ include "faro.bootstrapSecretName" . }} -n {{ .Release.Namespace }} \
+         -o jsonpath='{.data.FARO_CREDENTIAL_KEY}' | base64 -d
+
+     Está en un Secret con helm.sh/resource-policy: keep, así que un
+     `helm uninstall` NO se la lleva. Eso te cubre de un borrado, no de perder
+     el cluster.
+
+     ⚠️ Al reinstalar, usa el MISMO nombre de release ({{ .Release.Name }}) y el
+        mismo namespace, o Helm abortará por "invalid ownership metadata".
+  ─────────────────────────────────────────────────────────────────────────────
+{{- else }}
+
+  ⚠️ La llave maestra y el acceso inicial vienen del Secret externo
+     "{{ .Values.credentialKey.existingSecret }}". Helm no lo creó y no lo va a borrar. Asegúrate
+     de que la llave sigue copiada en tu gestor de secretos: si se pierde, las
+     credenciales cifradas de Faro son irrecuperables.
+
+     El asistente está en {{ include "faro.url" . }}/setup
+{{- end }}
+
+  3. Comprueba que arrancó:
+
+       kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "faro.backend.fullname" . }}
+       kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "faro.frontend.fullname" . }}
+
+     El primer arranque tarda: Flyway migra el esquema completo antes de que el
+     backend responda. La startupProbe le da hasta {{ mul .Values.backend.startupProbe.periodSeconds .Values.backend.startupProbe.failureThreshold }}s.
+
+{{- if eq (include "faro.tlsEnabled" .) "false" }}
+
+  ⚠️ TLS DESACTIVADO. Faro se sirve por HTTP, así que la cookie de sesión nunca
+     se marcará Secure y viajará en claro. Además, la mayoría de proveedores de
+     identidad rechazan un redirect URI http:// que no sea localhost, así que el
+     asistente no podrá configurar el login. Pon certManager.issuer o un
+     certificado propio en ingress.tls.secretName.
+{{- end }}
+{{- if and .Values.database.deploy (not .Values.database.persistence.enabled) }}
+
+  ⚠️ POSTGRES SIN VOLUMEN PERSISTENTE (database.persistence.enabled=false).
+     Un reinicio del pod borra la instalación entera: lo que configure el
+     asistente, las apps, los entornos, los clusters y las credenciales.
+     Solo para una demo que se va a tirar.
+{{- end }}
+{{- if not .Values.build.createNamespace }}
+
+  ℹ️ build.createNamespace=false: el namespace "{{ .Values.build.namespace }}" tiene que existir ya, y el
+     Role/RoleBinding de builds se aplicaron dentro. Si existe con otro nombre
+     del que lee el backend, el primer build fallará con un 403.
+{{- end }}
+{{- if eq .Values.imagePullSecret.mode "none" }}
+
+  ℹ️ imagePullSecret.mode=none. Si los pods quedan en ImagePullBackOff con
+     "denied", es esto: los paquetes de ghcr.io/syntax-company son privados.
+{{- end }}
+
+  ⚠️ CADA CLUSTER DE WORKLOAD NECESITA ARGO CD Y ARGO ROLLOUTS.
+
+     No este cluster: Faro no despliega donde vive. Escribe los manifiestos en el
+     repositorio de GitOps y crea un Application de Argo CD EN EL CLUSTER DE
+     DESTINO, hablando con él por el kubeconfig que custodia.
+
+       kubectl create namespace {{ .Values.argocd.namespace }}
+       kubectl apply -n {{ .Values.argocd.namespace }} -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+       kubectl create namespace argo-rollouts
+       kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+
+     Sin Argo CD el despliegue falla con un error que no lo nombra; sin Argo
+     Rollouts se queda en curso para siempre. Faro lo comprueba al REGISTRAR el
+     cluster, que es cuando se sabe de cuál se trata.
+
+  El chart NO instala infraestructura. El controlador de Ingress, la StorageClass
+  y cert-manager los pone tu equipo.

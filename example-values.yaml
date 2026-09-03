@@ -1,0 +1,114 @@
+# ---------------------------------------------------------------------------------------------
+# Plantilla de values para una instalación de Faro. Cópiala, rellénala y pásala con -f.
+#
+#   cp example-values.yaml mis-values.yaml
+#   helm install faro ./charts/faro --namespace faro --create-namespace -f mis-values.yaml
+#
+# ⚠️ ESTA PLANTILLA ENCOGIÓ. El proveedor de identidad, el registro donde Faro publica lo que
+# construye, el repositorio de GitOps y el dominio base de las apps YA NO SE CONFIGURAN AQUÍ: los
+# captura el asistente de primer arranque, desde la propia interfaz. El backend retiró esas
+# variables de entorno — ponerlas en el chart no tendría ningún efecto.
+#
+# Lo que queda es lo que no puede venir de Faro porque Faro todavía no existe. Ver
+# charts/faro/values.yaml para el resto de opciones y el porqué de cada una.
+# ---------------------------------------------------------------------------------------------
+
+global:
+  # El host único de Faro: el portal y la API bajo el mismo dominio.
+  #
+  # Es la única URL que hay que saber al instalar: el Ingress tiene que enrutar este host ANTES de
+  # que Faro exista, así que no se pudo mover al asistente. Su DNS tiene que apuntar YA a la IP del
+  # controlador de Ingress.
+  #
+  # ⚠️ NO es el dominio base de las apps (el comodín). Ése lo pide el asistente.
+  domain: faro.tuempresa.com
+
+# Versión. Si se omite el bloque entero, se instala la `appVersion` del chart (hoy 0.0.0).
+# ⚠️ El tag de la imagen va SIN `v`: el tag de git es v0.0.0 y el de la imagen 0.0.0.
+# images:
+#   backend:  { tag: "0.0.0" }
+#   frontend: { tag: "0.0.0" }
+
+# Descarga de las imágenes DE FARO (no el registro donde Faro publica lo que construye: ése lo
+# configura el asistente). Los paquetes de ghcr.io/syntax-company son PRIVADOS.
+#
+# El chart CREA el Secret con estas credenciales. Antes había que hacerlo a mano con
+# `kubectl create secret docker-registry`, y olvidarlo dejaba la instalación en ImagePullBackOff con
+# un `denied` que no menciona en ningún sitio el comando que falta.
+imagePullSecret:
+  mode: create
+  registry: ghcr.io
+  username: ""      # usuario de GitHub o bot de la organización
+  password: ""      # PAT clásico con scope read:packages
+  #
+  # Alternativa: créalo fuera y referéncialo, para que el PAT no viva en este archivo.
+  #   mode: existing
+  #   existingSecret: faro-ghcr
+
+ingress:
+  # Sácala de `kubectl get ingressclass`. Vacío = la que esté marcada como default.
+  className: nginx
+  tls:
+    enabled: true
+    secretName: faro-tls
+
+certManager:
+  # ClusterIssuer que emite el certificado del portal y, en cada cluster de workload, los de las
+  # apps. Vacío = HTTP plano — y entonces el asistente no podrá configurar el login, porque casi
+  # ningún proveedor de identidad acepta un redirect URI http:// que no sea localhost.
+  issuer: letsencrypt-prod
+
+database:
+  # true  = el chart despliega Postgres con volumen persistente.
+  # false = base externa; rellena `host`. El usuario necesita poder crear la extensión pgcrypto.
+  #
+  # ⚠️ NO hay `name`: la base se llama SIEMPRE `faro`. Un valor menos que se puede escribir mal.
+  deploy: true
+  # host: postgres.interno.tuempresa.com    # solo con deploy: false
+  username: faro
+  password: ""
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""    # vacío = la StorageClass por defecto del cluster
+
+credentialKey:
+  # ⚠️⚠️ LA LLAVE MAESTRA. Cifra TODAS las credenciales que Faro guarda, incluidas las que capture
+  # el asistente. Si se pierde, ese material es irrecuperable.
+  #
+  #   openssl rand -base64 32
+  #
+  # El chart crea el Secret y le pone `helm.sh/resource-policy: keep`, así que un `helm uninstall`
+  # no se la lleva. En un `helm upgrade` se puede omitir: la recupera del cluster.
+  #
+  # En producción es mejor `existingSecret`: el Secret lo creas tú desde tu gestor de secretos y la
+  # llave no pasa por ningún values ni por el historial de releases de Helm.
+  value: ""
+  # existingSecret: faro-bootstrap
+
+# El acceso inicial: con esto se entra la PRIMERA vez, antes de que exista proveedor de identidad,
+# para completar el asistente. Vacío = lo genera el chart y sale en las notas de `helm install`.
+# Un `helm upgrade` no lo rota.
+#
+# bootstrapToken:
+#   value: ""
+#   disabled: false     # true lo retira, que es la higiene cuando el asistente termina
+
+# OPCIONAL. Namespace y proyecto de Argo CD EN LOS CLUSTERS DE WORKLOAD (no en el de Faro).
+# argocd:
+#   namespace: argocd
+#   project: default
+
+# OPCIONAL. El namespace de builds, donde el chart crea el Role y el RoleBinding.
+# ⚠️ Ya no lleva `registry`: el registro donde Faro publica lo configura el asistente.
+# build:
+#   namespace: faro-builds
+#   createNamespace: true    # false si el namespace ya existe
+
+# OPCIONAL. Recursos. ⚠️ `backend.replicas` no existe: es 1 fijo, invariante de corrección.
+# backend:
+#   resources:
+#     requests: { cpu: 500m, memory: 1Gi }
+#     limits:   { memory: 2Gi }
+# frontend:
+#   replicaCount: 2

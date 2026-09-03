@@ -1,0 +1,82 @@
+{{- /*
+El Ingress de host único. Es la pieza sin la cual el login no carga, así que conviene entender por
+qué es así y no de otra forma.
+
+  https://{global.domain}/api/...  ->  faro-backend  (8080)
+  https://{global.domain}/...      ->  faro-frontend (3000)
+
+TRES hechos del código lo obligan, y ninguno es negociable desde el chart:
+
+1. El backend sirve TODO bajo `server.servlet.context-path: /api`. El prefijo es parte de su ruta,
+   no un adorno del Ingress: aquí NO se reescribe. Si alguien añade un `rewrite-target: /` de
+   ingress-nginx, todas las peticiones llegan al backend sin el prefijo y responde 404.
+
+2. El portal llama al API con base RELATIVA `/api`, horneada en la imagen. NEXT_PUBLIC_API_URL es
+   una variable de tiempo de build que Next sustituye en el bundle del navegador: la imagen se
+   publica sin definirla para que valga en cualquier instalación. No hay forma de apuntar el portal
+   a otro origen sin reconstruir la imagen.
+
+3. Por eso tienen que compartir origen. Con dos hostnames (faro. y api.faro.) el navegador bloquea
+   la cookie de sesión en los XHR de la SPA: el backend no fija `SameSite=None; Secure`, así que
+   hereda `SameSite=Lax`, que no viaja en peticiones de origen cruzado. El síntoma es un portal que
+   carga y un login que nunca termina.
+
+⚠️ Y por qué `/api` y no una lista de rutas: sin el context-path, backend y frontend colisionaban en
+nueve rutas (/login, /clusters, /connections, /teams, /users, /roles, /access-rules,
+/resource-profiles, /metrics). `/login` era la peor: la página de login es del portal y
+`/login/oauth2/code/{provider}` es el callback del backend. Una lista exhaustiva de paths se rompe
+en silencio —con un 404— cada vez que cualquiera de los dos repos añade una ruta.
+
+Orden de las reglas: `/api` va PRIMERO. Los controladores serios resuelven por prefijo más largo
+independientemente del orden, pero los hay que no, y la diferencia es que todo el API se sirva como
+el portal.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+{{- $domain := required "global.domain es OBLIGATORIO: es el host unico de Faro (portal + API bajo el mismo dominio)." .Values.global.domain }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "faro.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "faro.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.certManager.issuer }}
+    # cert-manager emite el certificado de este host por HTTP-01. Requiere que el DNS de
+    # {{ $domain }} YA apunte a la IP del controlador de Ingress: si no, el reto falla en silencio y
+    # el Secret del certificado nunca aparece.
+    cert-manager.io/cluster-issuer: {{ .Values.certManager.issuer | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- if eq (include "faro.tlsEnabled" .) "true" }}
+  tls:
+    - hosts:
+        - {{ $domain | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ $domain | quote }}
+      http:
+        paths:
+          # ⚠️ PRIMERO el API, y SIN reescritura del path.
+          - path: {{ include "faro.backend.contextPath" . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "faro.backend.fullname" . }}
+                port:
+                  number: {{ include "faro.backend.port" . }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "faro.frontend.fullname" . }}
+                port:
+                  number: {{ include "faro.frontend.port" . }}
+{{- end }}
