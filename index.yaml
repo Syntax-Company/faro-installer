@@ -1,0 +1,27 @@
+apiVersion: v1
+entries:
+  faro:
+  - annotations:
+      artifacthub.io/prerelease: "true"
+    apiVersion: v2
+    appVersion: 0.0.0
+    created: "2026-09-04T13:56:18.955930111Z"
+    description: Faro — plataforma interna de despliegue (backend, portal y su base
+      de datos) sobre un cluster de Kubernetes ya existente.
+    digest: 4ae337be804e4091cdb0b9765b2c0f146038f9b3b7f51e102d27e45cc6b1209b
+    home: https://github.com/Syntax-Company/faro-installer
+    keywords:
+    - faro
+    - platform
+    - internal-developer-platform
+    kubeVersion: '>=1.24.0-0'
+    name: faro
+    sources:
+    - https://github.com/Syntax-Company/faro-installer
+    - https://github.com/Syntax-Company/faro-backend
+    - https://github.com/Syntax-Company/faro-frontend
+    type: application
+    urls:
+    - https://get.faro.run/faro-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-09-04T13:56:18.954545677Z"
