@@ -128,6 +128,19 @@ jobs:
             exit 1
           fi
 
+          # Y la otra pareja: la version de FARO. `appVersion` es el tag que piden los Deployments
+          # cuando no se fija `images.*.tag`, asi que un chart publicado con un appVersion viejo
+          # instala una version vieja sin decirlo. ci.yml ya lo comprueba en cada cambio; aqui otra
+          # vez, porque un tag se puede sacar de un commit que nunca paso por ci.
+          APP_VERSION="$(sed -n 's/^appVersion:[[:space:]]*//p' charts/faro/Chart.yaml | head -n1 | tr -d '"')"
+          OFFERED="$(sed -n 's/^FARO_VERSION_DEFAULT="\(.*\)"$/\1/p' install.sh)"
+          echo "appVersion       $APP_VERSION"
+          echo "FARO_VERSION..   $OFFERED"
+          if [ "$APP_VERSION" != "$OFFERED" ]; then
+            echo "::error::Chart.yaml appVersion dice $APP_VERSION y FARO_VERSION_DEFAULT de install.sh dice $OFFERED."
+            exit 1
+          fi
+
       - name: El chart tiene que ser válido
         working-directory: src
         run: helm lint charts/faro --strict
@@ -145,7 +158,7 @@ jobs:
           ref: gh-pages
           path: site
 
-      - name: Añadir el chart al índice
+      - name: Añadir el paquete al sitio
         if: startsWith(github.ref, 'refs/tags/chart-v')
         run: |
           set -euo pipefail
@@ -155,9 +168,7 @@ jobs:
             exit 1
           fi
           cp packaged/faro-*.tgz site/
-          # --merge conserva las entradas de las versiones anteriores; sin él, el índice se quedaría
-          # solo con lo que hay en el directorio y perdería el histórico de metadatos.
-          helm repo index site --url https://get.faro.run --merge site/index.yaml
+          ls -l "site/faro-${VERSION}.tgz"
 
       - name: Publicar el instalador
         run: |
@@ -173,17 +184,123 @@ jobs:
           # ⚠️ Sin este fichero, el push a gh-pages borra el dominio personalizado en Settings y
           # get.faro.run deja de responder.
           printf 'get.faro.run\n' > site/CNAME
+          # ⚠️ EL SITIO NO LLEVA .gitignore, Y ESTO NO ES LIMPIEZA.
+          #
+          # Es lo que rompió la publicación de 0.1.0. Si la rama del sitio se creó con
+          # `git checkout --orphan` (que conserva el índice y el árbol de trabajo, al contrario que
+          # `git switch --orphan`), el primer commit se llevó el .gitignore de master — y ahí hay un
+          # `*.tgz` que existe para que los paquetes NO se commiteen en la rama de código. En la rama
+          # del sitio esa misma regla significa lo contrario: que el paquete no se publica.
+          #
+          # `git add` no dice nada al saltarse un fichero ignorado, así que el trabajo terminó en
+          # verde con el índice publicado y el .tgz no.
+          #
+          # El sitio es contenido 100% generado por este workflow: aquí no hay nada que ignorar
+          # nunca, y por eso el fichero se borra en cada publicación en vez de editarse.
+          rm -f site/.gitignore
 
-      - name: Subir el sitio
+      # ⚠️⚠️ EL ÍNDICE SE REGENERA ENTERO, A PARTIR DE LOS .tgz QUE HAY EN EL DIRECTORIO.
+      #
+      # Antes esto era `--merge`, que añade la entrada nueva al índice anterior. Es más barato y es
+      # lo que rompió: `--merge` mantiene en el índice entradas cuyos ficheros ya no están —o nunca
+      # llegaron a estar—, y entonces el índice pasa a ser una AFIRMACIÓN sobre el sitio en vez de
+      # una DESCRIPCIÓN de él. Que 0.1.0 se anunciara con un 404 detrás es exactamente eso.
+      #
+      # Regenerando, el índice no puede hablar de un fichero que no existe: se construye leyendo los
+      # ficheros. El precio es que los `created` se rescriben en cada publicación — ruido en un
+      # fichero generado de una rama generada, que es el sitio más barato posible donde pagarlo.
+      #
+      # Efecto secundario deseado: una entrada fantasma que ya esté en el índice desaparece sola en
+      # la siguiente publicación, sin cirugía manual.
+      - name: Regenerar el índice desde los paquetes que hay
+        working-directory: site
+        run: |
+          set -euo pipefail
+          helm repo index . --url https://get.faro.run
+          cat index.yaml
+
+      - name: Registrar los ficheros del sitio
         working-directory: site
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
+          # ⚠️ `-f` explícito para los paquetes. El `rm` del .gitignore de arriba ya debería bastar,
+          # pero esto no depende de ello: es el fichero cuya ausencia silenciosa causó el fallo, y
+          # forzarlo cuesta dos líneas.
+          shopt -s nullglob
+          paquetes=( *.tgz )
+          if [ ${#paquetes[@]} -gt 0 ]; then
+            git add -f -- "${paquetes[@]}"
+          fi
+
+      # ⚠️⚠️ LA GUARDA. Que el índice anuncie algo que no está no debería ser posible, y la
+      # regeneración de arriba ya lo hace estructuralmente imposible... siempre que el fichero llegue
+      # a publicarse. Este paso cierra el hueco que quedaba: comprueba, contra el ÍNDICE DE GIT y no
+      # contra el disco, que cada URL anunciada corresponde a un fichero que se va a subir de verdad.
+      #
+      # Es la diferencia que importa: el fallo de 0.1.0 tenía el .tgz en el disco (por eso
+      # `helm repo index` lo encontró y lo anunció) y fuera de git (por eso nunca se publicó). Mirar
+      # el disco no lo habría detectado; mirar lo que git tiene registrado, sí.
+      - name: El índice no puede anunciar lo que no se va a publicar
+        working-directory: site
+        run: |
+          set -euo pipefail
+          fallos=0
+          anunciados="$(grep -oE 'https://get\.faro\.run/[^[:space:]]+\.tgz' index.yaml | sort -u || true)"
+          if [ -z "$anunciados" ]; then
+            echo "El indice no anuncia ningun paquete todavia."
+            exit 0
+          fi
+          while read -r url; do
+            fichero="${url##*/}"
+            if [ ! -f "$fichero" ]; then
+              echo "::error::El indice anuncia $url y $fichero no esta en el sitio."
+              fallos=1
+              continue
+            fi
+            if ! git ls-files --error-unmatch -- "$fichero" >/dev/null 2>&1; then
+              echo "::error::El indice anuncia $url pero $fichero NO esta registrado en git: se publicaria un indice con un 404 detras. Mira si algo lo esta ignorando."
+              fallos=1
+              continue
+            fi
+            echo "ok  $url"
+          done <<< "$anunciados"
+          if [ "$fallos" -ne 0 ]; then
+            echo "::error::No se publica nada: el indice y los paquetes no coinciden."
+            exit 1
+          fi
+
+      - name: Subir el sitio
+        working-directory: site
+        run: |
+          set -euo pipefail
           if git diff --cached --quiet; then
             echo "El sitio no ha cambiado; no se publica nada."
             exit 0
           fi
           git commit -m "publish: ${GITHUB_REF_NAME} (${GITHUB_SHA})"
           git push origin gh-pages
+
+      # Comprobación de lo que de verdad sirve el dominio. Todo lo anterior valida lo que se sube;
+      # esto valida lo que se puede descargar, que es lo único que le consta a quien instala.
+      #
+      # Pages despliega de forma asíncrona, así que se reintenta: un 404 en el primer intento es
+      # normal, uno a los dos minutos es el fallo que estamos arreglando.
+      - name: El paquete se puede descargar
+        if: startsWith(github.ref, 'refs/tags/chart-v')
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#chart-v}"
+          URL="https://get.faro.run/faro-${VERSION}.tgz"
+          for intento in $(seq 1 12); do
+            if curl -fsSL --max-time 20 -o /dev/null "$URL"; then
+              echo "$URL responde (intento $intento)."
+              exit 0
+            fi
+            echo "Todavia no ($intento/12); Pages despliega con retraso."
+            sleep 15
+          done
+          echo "::error::$URL sigue sin responder dos minutos despues de publicar. El indice lo anuncia, asi que una instalacion que pinne $VERSION fallara con un 404."
+          exit 1

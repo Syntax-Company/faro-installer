@@ -56,6 +56,30 @@ jobs:
             exit 1
           fi
 
+      # ⚠️ La OTRA pareja de versiones, que es distinta de la de arriba y se confunde con ella.
+      # Arriba, la versión del CHART. Aquí, la de FARO — o sea, el tag de las imágenes.
+      #
+      # `appVersion` no es una etiqueta descriptiva: es el tag que piden los dos Deployments cuando
+      # no se fija `images.*.tag` (backend-deployment.yaml:114). Si se queda atrás, un `helm install`
+      # del chart a pelo se baja una versión vieja, o ninguna. `FARO_VERSION_DEFAULT` es la que el
+      # instalador ofrece en la pregunta. Las dos tienen que decir la misma versión de Faro.
+      - name: Chart.yaml e install.sh dicen la misma versión de Faro
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(sed -n 's/^appVersion:[[:space:]]*//p' charts/faro/Chart.yaml | head -n1 | tr -d '"')"
+          OFFERED="$(sed -n 's/^FARO_VERSION_DEFAULT="\(.*\)"$/\1/p' install.sh)"
+          echo "Chart.yaml appVersion      $APP_VERSION"
+          echo "install.sh FARO_VERSION..  $OFFERED"
+          [ -n "$APP_VERSION" ] || { echo "::error::No se pudo leer appVersion de Chart.yaml"; exit 1; }
+          [ -n "$OFFERED" ]     || { echo "::error::No se pudo leer FARO_VERSION_DEFAULT de install.sh"; exit 1; }
+          case "$APP_VERSION" in
+            v*|V*) echo "::error::appVersion lleva 'v' ($APP_VERSION). El tag de la imagen va sin ella: el pod quedaria en ImagePullBackOff."; exit 1 ;;
+          esac
+          if [ "$APP_VERSION" != "$OFFERED" ]; then
+            echo "::error::Chart.yaml appVersion dice $APP_VERSION y FARO_VERSION_DEFAULT de install.sh dice $OFFERED. Son la misma cosa: la version de Faro que se instala por defecto."
+            exit 1
+          fi
+
       # Renderizar el chart con lo que el instalador pasa de verdad. `helm lint` valida el chart en
       # abstracto; esto comprueba que la combinación concreta que produce install.sh sale.
       #

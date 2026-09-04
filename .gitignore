@@ -3,5 +3,10 @@ mis-values.yaml
 *-values.yaml
 !example-values.yaml
 
-# Paquetes del chart
+# Paquetes del chart. Se construyen al publicar, no se commitean AQUÍ.
+#
+# ⚠️ Esta regla NO puede acabar en la rama `gh-pages`: allí los .tgz son justamente lo que hay que
+# publicar, y `git add` se los salta sin decir nada. Es lo que dejó a faro-0.1.0 anunciado en el
+# índice y con un 404 detrás. El workflow borra el .gitignore del sitio en cada publicación
+# (.github/workflows/publish.yml) y además fuerza el add de los paquetes.
 *.tgz

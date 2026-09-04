@@ -5,10 +5,27 @@ type: application
 
 # Versión DEL CHART (de la instalación), no del producto. Sube con cada cambio del chart aunque
 # las imágenes no se muevan: son ciclos de vida distintos y por eso el chart vive en su propio repo.
-version: 0.1.0
+#
+# ⚠️ Tiene que coincidir con `CHART_VERSION_DEFAULT` de install.sh, que es la que un
+# `curl | bash` descarga. Lo comprueban ci.yml en cada cambio y publish.yml al publicar.
+version: 0.1.1
 
 # Versión de Faro que instala este chart por defecto: es el default de `images.backend.tag` y de
 # `images.frontend.tag`, que se pueden sobreescribir por separado si alguna vez van desacopladas.
+#
+# ⚠️⚠️ ESTO NO ES UNA ETIQUETA DESCRIPTIVA: ES UN TAG DE IMAGEN QUE SE VA A PEDIR AL REGISTRO.
+#
+# `backend-deployment.yaml:114` y `frontend-deployment.yaml:49` lo usan tal cual cuando no se fija
+# `images.*.tag`. Un `helm install` a pelo del chart —sin el instalador, que sí pregunta la versión—
+# se descarga literalmente esta cadena.
+#
+# Por eso TIENE que seguir a las imágenes publicadas. Quedarse atrás no produce un error de
+# versionado: produce un `ImagePullBackOff` con `manifest unknown` si el tag ya no existe, o algo
+# peor —una instalación silenciosa de una versión vieja— si existe. Se quedó en 0.0.0 mientras las
+# imágenes iban por 0.0.3, y el índice del repositorio de charts lo anunciaba así.
+#
+# Coincide con `FARO_VERSION_DEFAULT` de install.sh, que es la versión que el instalador OFRECE.
+# ci.yml comprueba que no se separen.
 #
 # ⚠️ SIN la `v`, y la diferencia importa. El workflow de publicación de ambos repos normaliza con
 # `VERSION="${RAW#[vV]}"` y publica DOS cosas con nombres distintos:
@@ -22,7 +39,7 @@ version: 0.1.0
 # El CI publica también `sha-<short>` para trazabilidad. NO existe `latest`, a propósito: una
 # instalación tiene que poder decir qué versión corre, y un tag móvil cambia bajo sus pies sin que
 # nada lo registre.
-appVersion: "0.0.0"
+appVersion: "0.0.3"
 
 home: https://github.com/Syntax-Company/faro-installer
 sources:
