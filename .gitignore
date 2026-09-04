@@ -1,7 +1,0 @@
-# Values reales de una instalación: contraseña de BD, client secret del IdP y la llave maestra.
-mis-values.yaml
-*-values.yaml
-!example-values.yaml
-
-# Paquetes del chart
-*.tgz

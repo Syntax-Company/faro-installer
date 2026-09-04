@@ -77,7 +77,7 @@ VALUES_OUT="${FARO_VALUES_OUT:-faro-values.yaml}"
 # porque el script tiene que poder proponerla ANTES de haber localizado el chart, y leerla de
 # Chart.yaml exigiría un parser de YAML que este script no tiene. Al subir una release hay que
 # tocar los dos sitios.
-FARO_VERSION_DEFAULT="0.0.0"
+FARO_VERSION_DEFAULT="0.0.3"
 
 # Versión DEL CHART que se descarga cuando no hay uno al lado. Es la `version:` de Chart.yaml, no la
 # de Faro: son ciclos de vida distintos.
@@ -91,7 +91,7 @@ FARO_VERSION_DEFAULT="0.0.0"
 #
 # Este script y el chart se publican JUNTOS, así que la constante y `charts/faro/Chart.yaml` no
 # pueden divergir: el workflow de publicación aborta si no coinciden (.github/workflows/publish.yml).
-CHART_VERSION_DEFAULT="0.1.0"
+CHART_VERSION_DEFAULT="0.1.1"
 CHART_VERSION="${FARO_CHART_VERSION:-}"
 
 RELEASE="${FARO_RELEASE:-faro}"
