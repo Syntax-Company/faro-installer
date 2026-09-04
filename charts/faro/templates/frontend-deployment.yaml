@@ -25,9 +25,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      # ⚠️ El mismo secreto de descarga que el backend: los dos paquetes de ghcr.io son privados.
-      # Declararlo solo en uno de los dos Deployments es un error frecuente y deja media instalación
-      # arrancada, lo que hace pensar que el problema es del otro componente.
+      # Normalmente vacío: los paquetes de Faro son públicos. Solo aparece con
+      # `imagePullSecret.mode=existing`, y entonces tiene que ser EL MISMO que el backend: declararlo
+      # en uno solo de los dos Deployments deja media instalación arrancada, lo que hace pensar que
+      # el problema es del otro componente.
       {{- with (include "faro.imagePullSecretName" .) }}
       imagePullSecrets:
         - name: {{ . }}

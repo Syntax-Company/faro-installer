@@ -52,11 +52,23 @@ set -euo pipefail
 
 # ── Constantes ───────────────────────────────────────────────────────────────────────────────
 
-INSTALLER_REPO="${FARO_INSTALLER_REPO:-https://github.com/Syntax-Company/faro-installer}"
-INSTALLER_REF="${FARO_INSTALLER_REF:-master}"
+# ── De dónde sale el chart ───────────────────────────────────────────────────────────────────
+#
+# El sitio de GitHub Pages del repositorio publica TRES cosas bajo el mismo dominio:
+#
+#   https://get.faro.run                     este mismo script  (es lo que hace posible el
+#                                            `curl -fsSL https://get.faro.run | bash`)
+#   https://get.faro.run/index.yaml          el índice del repositorio Helm
+#   https://get.faro.run/faro-<version>.tgz  el chart empaquetado, una version por release
+#
+# ⚠️ Un solo dominio y un solo sitio publicado a propósito. El script tiene que poder ejecutarse SIN
+# repositorio clonado, así que necesita traerse el chart de algún sitio público; que ese sitio sea el
+# mismo que ya sirve el script significa un despliegue, un DNS y una cosa que puede romperse en vez
+# de dos. Y el `.tgz` se lo traga `helm` directamente, así que no hace falta ni `tar` ni `git`.
+FARO_SITE="${FARO_SITE:-https://get.faro.run}"
 
 # ⚠️ Los Secrets los crea EL CHART, no este script (ver la sección 5). Sus nombres los deriva del
-# nombre de la release: `<release>-bootstrap`, `<release>-app` y `<release>-registry`.
+# nombre de la release: `<release>-bootstrap` y `<release>-app`.
 
 BUILD_NAMESPACE="faro-builds"
 VALUES_OUT="${FARO_VALUES_OUT:-faro-values.yaml}"
@@ -66,6 +78,21 @@ VALUES_OUT="${FARO_VALUES_OUT:-faro-values.yaml}"
 # Chart.yaml exigiría un parser de YAML que este script no tiene. Al subir una release hay que
 # tocar los dos sitios.
 FARO_VERSION_DEFAULT="0.0.0"
+
+# Versión DEL CHART que se descarga cuando no hay uno al lado. Es la `version:` de Chart.yaml, no la
+# de Faro: son ciclos de vida distintos.
+#
+# ⚠️ Se fija aquí, en una constante, y no se resuelve a «la última». Dos razones:
+#
+#   · una instalación tiene que poder decir qué versión instaló y repetirse igual más tarde, y con
+#     un puntero móvil eso no se puede;
+#   · averiguar cuál es la última exigiría parsear el `index.yaml`, y este script no tiene parser de
+#     YAML a propósito.
+#
+# Este script y el chart se publican JUNTOS, así que la constante y `charts/faro/Chart.yaml` no
+# pueden divergir: el workflow de publicación aborta si no coinciden (.github/workflows/publish.yml).
+CHART_VERSION_DEFAULT="0.1.0"
+CHART_VERSION="${FARO_CHART_VERSION:-}"
 
 RELEASE="${FARO_RELEASE:-faro}"
 NAMESPACE_DEFAULT="faro"
@@ -363,6 +390,18 @@ valid_version() {
   return 1
 }
 
+# La versión DEL CHART, que no es la de Faro y no admite las mismas formas: no hay `sha-<short>` de
+# un chart, solo las versiones publicadas en el índice. Se comprueba antes de construir la URL para
+# que un error de tecleo salga como tal y no como un 404 sobre un dominio que parece caído.
+valid_chart_version() {
+  case "$1" in
+    v*|V*) bad "La versión del chart va SIN «v»: escribe ${1#[vV]}, no $1." ; return 1 ;;
+  esac
+  printf '%s' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' && return 0
+  bad "«$1» no es una versión de chart válida. Se espera X.Y.Z (ej: 0.1.0)."
+  return 1
+}
+
 # Comprobación de DNS: informativa y nunca bloqueante. Que el DNS no esté propagado a mitad de una
 # instalación es normal; que apunte a otro sitio también hay que saberlo, pero no es este script
 # quien puede decidirlo. Devuelve 0 resuelve, 1 no resuelve, 2 no hay con qué comprobarlo.
@@ -464,8 +503,11 @@ Instalador de Faro.
 Opciones:
   -n, --namespace NS    Namespace de Faro (por defecto se pregunta; default faro)
   -r, --release NAME    Nombre de la release de Helm (por defecto: faro)
-      --chart REF       Ruta, .tgz o URL del chart. Por defecto usa ./charts/faro si existe,
-                        y si no se descarga del repositorio del instalador.
+      --chart REF       Ruta, .tgz o URL del chart. Por defecto usa el charts/faro que haya
+                        junto al script (repositorio clonado), y si no lo descarga de
+                        https://get.faro.run
+      --chart-version V Versión del chart a descargar (por defecto la que trae el script).
+                        No aplica si el chart es local o viene de --chart.
       --dry-run         Comprueba y pregunta todo, pero no crea ni instala nada.
       --skip-checks     Salta las comprobaciones del cluster. No lo uses.
   -y, --yes             No pide confirmación antes de aplicar.
@@ -475,8 +517,7 @@ Toda pregunta se puede pre-responder con una variable de entorno del mismo nombr
 aparece en la respuesta. Para una instalación sin terminal:
 
   FARO_DOMAIN=faro.acme.com FARO_DB_MODE=desplegar \
-  FARO_GHCR_USER=... FARO_GHCR_TOKEN=... \
-  bash install.sh --yes
+  curl -fsSL https://get.faro.run | bash -s -- --yes
 
 El proveedor de identidad, el registro de imagenes, el repositorio de GitOps y el
 dominio base de las apps ya NO se preguntan aqui: los configura el asistente de
@@ -489,7 +530,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -n|--namespace) FARO_NAMESPACE="${2:?}"; NAMESPACE_FIXED=1; shift 2 ;;
     -r|--release)   RELEASE="${2:?}";  shift 2 ;;
-    --chart)        CHART="${2:?}";    shift 2 ;;
+    --chart)         CHART="${2:?}";         shift 2 ;;
+    --chart-version) CHART_VERSION="${2:?}"; shift 2 ;;
     --dry-run)      DRY_RUN=1;         shift ;;
     --skip-checks)  SKIP_CHECKS=1;     shift ;;
     -y|--yes)       ASSUME_YES=1;      shift ;;
@@ -654,29 +696,69 @@ fi
 
 step "Localizando el chart"
 
+# ⚠️ TRES ORÍGENES, y el orden es la política: lo que el operador manda, luego lo que tiene al lado,
+# y solo si no hay nada, la red.
+#
+#   --chart                 gana siempre. Es la escapatoria para un chart modificado, un mirror
+#                           interno o un .tgz que ya está en disco.
+#   el chart de al lado     desarrollo: el repositorio clonado. Se prueba lo que hay en el árbol de
+#                           trabajo, no lo publicado, que es justo lo que se quiere al iterar.
+#   la descarga             `curl | bash` desde internet, que es el caso normal de un cliente. No
+#                           hay repositorio alrededor, así que el chart se trae de $FARO_SITE.
+#
+# ⚠️ La detección del chart de al lado mira el directorio DEL SCRIPT, no el directorio actual. Con
+# `./charts/faro` bastaba con ejecutar el instalador desde otra carpeta del propio repositorio para
+# que no lo encontrara y se pusiera a descargar de internet una versión distinta de la que se está
+# editando — el fallo más confuso posible mientras se desarrolla el chart.
+#
+# Con `curl | bash` no hay fichero: BASH_SOURCE vale "bash" o está vacío, no existe como ruta, y la
+# detección se salta sola sin necesidad de preguntarle a nadie cómo se está ejecutando.
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+fi
+
+# Lo que se escribe en el fichero de valores y se imprime al terminar: la referencia con la que se
+# puede REPETIR esta instalación. Con un chart local no hay referencia estable que dar, y el fichero
+# lo dice en vez de inventarse una.
+CHART_REF=""
+
 if [ -n "$CHART" ]; then
+  [ -e "$CHART" ] || case "$CHART" in
+    http://*|https://*|oci://*) : ;;
+    *) die "El chart indicado con --chart no existe: $CHART" ;;
+  esac
+  CHART_REF="$CHART"
   ok "Chart: $CHART  ${C_DIM}(--chart)${C_RESET}"
+elif [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/charts/faro/Chart.yaml" ]; then
+  CHART="$SCRIPT_DIR/charts/faro"
+  ok "Chart local: $CHART  ${C_DIM}(repositorio clonado — se instala lo que hay en el árbol de trabajo)${C_RESET}"
 elif [ -f "./charts/faro/Chart.yaml" ]; then
   CHART="./charts/faro"
-  ok "Chart local: $CHART"
+  ok "Chart local: $CHART  ${C_DIM}(directorio actual)${C_RESET}"
 else
-  # Ejecutado por `curl | bash`: no hay repositorio alrededor, hay que traérselo.
-  have tar || die "Hace falta tar para desempaquetar el chart, o pásalo con --chart."
-  TARBALL="$INSTALLER_REPO/archive/refs/heads/$INSTALLER_REF.tar.gz"
-  say "  Descargando el chart de $TARBALL"
+  CHART_VERSION="${CHART_VERSION:-$CHART_VERSION_DEFAULT}"
+  valid_chart_version "$CHART_VERSION" || die "Versión de chart no válida: «$CHART_VERSION».
+       Las publicadas están en ${FARO_SITE}/index.yaml"
+  CHART_REF="$FARO_SITE/faro-${CHART_VERSION}.tgz"
+  say "  Descargando el chart ${CHART_REF}"
+  # ⚠️ Se descarga el .tgz y se instala DESDE EL FICHERO, en vez de pasarle la URL a helm. Así la
+  # descarga falla aquí —con un mensaje que dice qué versión no está y dónde mirar— y no veinte
+  # líneas después, dentro de un error de Helm que habla de repositorios.
   if have curl; then
-    curl -fsSL "$TARBALL" -o "$WORKDIR/installer.tgz" || die "No se pudo descargar el chart.
-       Si el repositorio es privado, clónalo y ejecuta:
+    curl -fsSL "$CHART_REF" -o "$WORKDIR/faro-chart.tgz" || die "No se pudo descargar el chart ${CHART_VERSION} de $CHART_REF.
+       Comprueba que la versión existe — el índice las lista todas:
+         ${FARO_SITE}/index.yaml
+       O instala desde un repositorio clonado:
          bash install.sh --chart ./charts/faro"
   elif have wget; then
-    wget -qO "$WORKDIR/installer.tgz" "$TARBALL" || die "No se pudo descargar el chart."
+    wget -qO "$WORKDIR/faro-chart.tgz" "$CHART_REF" || die "No se pudo descargar el chart ${CHART_VERSION} de $CHART_REF.
+       Las versiones publicadas están en ${FARO_SITE}/index.yaml"
   else
     die "Hace falta curl o wget para descargar el chart, o pásalo con --chart."
   fi
-  tar -xzf "$WORKDIR/installer.tgz" -C "$WORKDIR" || die "El archivo descargado no es un tar.gz válido."
-  CHART="$(find "$WORKDIR" -type d -path '*/charts/faro' -print 2>/dev/null | head -n1)"
-  { [ -n "$CHART" ] && [ -f "$CHART/Chart.yaml" ]; } || die "No se encontró charts/faro dentro del paquete descargado."
-  ok "Chart descargado"
+  CHART="$WORKDIR/faro-chart.tgz"
+  ok "Chart ${C_BOLD}${CHART_VERSION}${C_RESET} descargado"
 fi
 
 # =============================================================================================
@@ -852,16 +934,17 @@ say ""
 
 # --- Descarga de las imágenes de Faro ---
 #
-# Esto SÍ se queda: son las credenciales para bajarse las imágenes DE FARO, que hacen falta antes de
-# que exista ningún Faro que pueda preguntarlas. No confundir con el registro donde Faro publica lo
-# que construye, que es el que se fue al asistente.
-say "  ${C_BOLD}Descarga de las imágenes de Faro${C_RESET}"
-say "  ${C_DIM}Los paquetes de ghcr.io/syntax-company son privados: hacen falta un usuario de${C_RESET}"
-say "  ${C_DIM}GitHub y un token con el permiso read:packages.${C_RESET}"
-FARO_GHCR_USER="${FARO_GHCR_USER:-}"
-ask FARO_GHCR_USER "Usuario de GitHub" "" valid_nonempty
-FARO_GHCR_TOKEN="${FARO_GHCR_TOKEN:-}"
-ask_secret FARO_GHCR_TOKEN "Token (read:packages)"
+# ⚠️ YA NO SE PREGUNTA NADA, y no es una simplificación cosmética: es lo que hace posible el
+# `curl -fsSL https://get.faro.run | bash`.
+#
+# Los paquetes de ghcr.io/syntax-company son PÚBLICOS, así que el cluster se baja las imágenes sin
+# credenciales. Antes se pedían aquí un usuario de GitHub y un PAT con `read:packages`, y eso
+# rompía la experiencia entera: una orden de una línea que a mitad te manda a la web de GitHub a
+# fabricar un token es exactamente igual de larga que la instalación manual que quería sustituir.
+#
+# El chart tampoco crea ya ningún Secret de descarga. Queda `imagePullSecret.mode=existing` para
+# quien haya replicado las imágenes en un registro propio que sí pida credenciales, pero eso es un
+# caso que se configura a mano y no una pregunta del camino normal.
 
 # =============================================================================================
 # 4. RESUMEN Y CONFIRMACIÓN
@@ -873,6 +956,7 @@ say "  Cluster           ${C_BOLD}${KUBE_CONTEXT}${C_RESET}"
 say "  Namespace         ${NAMESPACE}"
 say "  Release           ${RELEASE}$( [ -n "$EXISTING_RELEASE" ] && printf ' (actualización)' || printf ' (instalación nueva)' )"
 say "  Versión           ${BACKEND_TAG} backend / ${FRONTEND_TAG} frontend"
+say "  Chart             ${CHART_REF:-$CHART ${C_DIM}(local)${C_RESET}}"
 say "  Faro              ${SCHEME}://${FARO_DOMAIN}"
 case "$FARO_TLS_MODE" in
   cert-manager) say "  TLS               cert-manager — ${FARO_CERT_ISSUER}" ;;
@@ -902,12 +986,11 @@ confirm_or_die "¿Instalar Faro con esta configuración?"
 #
 # ⚠️ CAMBIO respecto a antes: los Secrets los crea EL CHART, no este script.
 #
-# El motivo salió probando la instalación a mano. El de la llave maestra y el `dockerconfigjson` de
-# descarga había que crearlos aparte con `kubectl create secret`, y olvidarse de cualquiera de los
-# dos dejaba la instalación a medias con un `CreateContainerConfigError` o un `ImagePullBackOff` que
-# no menciona en ningún sitio el comando que falta. Ahora se le dan los valores al chart y él los
-# crea: quien instale con `helm install` a pelo obtiene lo mismo que quien use este script, sin un
-# paso previo que nadie documenta en el sitio donde se echa de menos.
+# El motivo salió probando la instalación a mano. El Secret de la llave maestra había que crearlo
+# aparte con `kubectl create secret`, y olvidarlo dejaba la instalación a medias con un
+# `CreateContainerConfigError` que no menciona en ningún sitio el comando que falta. Ahora se le dan
+# los valores al chart y él lo crea: quien instale con `helm install` a pelo obtiene lo mismo que
+# quien use este script, sin un paso previo que nadie documenta en el sitio donde se echa de menos.
 #
 # Lo que este script sí hace es GENERAR los dos valores que nadie puede inventarse:
 #
@@ -1020,18 +1103,36 @@ fi
 VALUES_FILE="$WORKDIR/values.yaml"
 SECRETS_FILE="$WORKDIR/secrets.yaml"
 
+# ⚠️ QUÉ CHART SE USÓ, escrito en el fichero que queda en disco. Es media respuesta a «¿se puede
+# repetir esta instalación?»: sin esto, el fichero de valores dice cómo se configuró Faro pero no
+# con qué versión del chart, y dentro de seis meses no hay forma de reproducirla.
+#
+# Con un chart descargado la referencia es una URL con la versión dentro, que sirve tal cual para
+# volver a instalar exactamente lo mismo — `helm` acepta una URL a un .tgz igual que una ruta. Con
+# un chart local no existe esa referencia y el fichero lo dice en vez de inventarse una: apuntar a
+# una ruta del disco de quien instaló no le vale a nadie más.
+if [ -n "$CHART_REF" ]; then
+  CHART_RECORD="$CHART_REF"
+  UPGRADE_CMD="helm upgrade ${RELEASE} ${CHART_REF} -n ${NAMESPACE} -f ${VALUES_OUT}"
+else
+  CHART_RECORD="chart local ($CHART) — no reproducible desde otra máquina"
+  UPGRADE_CMD="helm upgrade ${RELEASE} <ruta-o-url-del-chart> -n ${NAMESPACE} -f ${VALUES_OUT}"
+fi
+
 {
   cat <<YAML
 # Configuración de esta instalación de Faro, generada por install.sh.
 #
 # NO contiene ningún secreto: la llave maestra y el token de acceso inicial viven en el Secret
-# «${BOOTSTRAP_SECRET}» del namespace ${NAMESPACE}, la contraseña de la base en «${FULLNAME}-app», y
-# las credenciales de descarga en «${FULLNAME}-registry». Un \`helm upgrade\` con este fichero los
-# recupera del cluster sin que haya que volver a tenerlos a mano.
+# «${BOOTSTRAP_SECRET}» del namespace ${NAMESPACE} y la contraseña de la base en «${FULLNAME}-app».
+# Un \`helm upgrade\` con este fichero los recupera del cluster sin que haya que volver a tenerlos a
+# mano.
+#
+# Chart usado en esta instalación: ${CHART_RECORD}
 #
 # Guárdalo: es lo único que hace falta para actualizar.
 #
-#   helm upgrade ${RELEASE} <chart> -n ${NAMESPACE} -f ${VALUES_OUT}
+#   ${UPGRADE_CMD}
 #
 # ⚠️ Lo que NO está aquí y no es un olvido: el proveedor de identidad, el registro donde Faro publica
 # lo que construye, el repositorio de GitOps y el dominio base de las apps. Eso se configura en el
@@ -1046,10 +1147,11 @@ images:
   frontend:
     tag: "${FRONTEND_TAG}"
 
-# El chart crea el Secret dockerconfigjson con las credenciales que van en el fichero de secretos.
-imagePullSecret:
-  mode: create
-  registry: ghcr.io
+# Sin bloque `imagePullSecret`: los paquetes de las imágenes son públicos y el chart no crea ningún
+# Secret de descarga. Si algún día las replicas en un registro privado, añade aquí:
+#   imagePullSecret:
+#     mode: existing
+#     existingSecret: <el Secret docker-registry que hayas creado en el namespace de Faro>
 
 ingress:
   className: "${FARO_INGRESS_CLASS}"
@@ -1112,7 +1214,6 @@ YAML
     printf 'bootstrapToken:\n  value: "%s"\n' "$BOOTSTRAP_TOKEN"
   fi
   printf 'database:\n  password: "%s"\n' "$FARO_DB_PASSWORD"
-  printf 'imagePullSecret:\n  username: "%s"\n  password: "%s"\n' "$FARO_GHCR_USER" "$FARO_GHCR_TOKEN"
 } > "$SECRETS_FILE"
 
 if [ -f "$VALUES_OUT" ]; then
@@ -1216,7 +1317,7 @@ if [ -n "$BOOTSTRAP_TOKEN" ]; then
   say "          proveedor elijas, y eso se elige ahí."
   say ""
   say "      ${C_DIM}Retíralo cuando termines:${C_RESET}"
-  say "      ${C_DIM}  helm upgrade $RELEASE $CHART -n $NAMESPACE -f $VALUES_OUT --set bootstrapToken.disabled=true${C_RESET}"
+  say "      ${C_DIM}  ${UPGRADE_CMD} --set bootstrapToken.disabled=true${C_RESET}"
   say "      ${C_DIM}No es urgente: se cierra solo cuando un login real funcione, y caduca a las 24h.${C_RESET}"
   say ""
   rule
@@ -1297,7 +1398,7 @@ if [ "$ARGOCD_NS" != "argocd" ]; then
 fi
 rule
 say ""
-say "  ${C_DIM}Actualizar:  helm upgrade $RELEASE $CHART -n $NAMESPACE -f $VALUES_OUT${C_RESET}"
+say "  ${C_DIM}Actualizar:  ${UPGRADE_CMD}${C_RESET}"
 say "  ${C_DIM}Estado:      kubectl -n $NAMESPACE get pods${C_RESET}"
 say "  ${C_DIM}Registros:   kubectl -n $NAMESPACE logs deploy/${FULLNAME}-backend -f${C_RESET}"
 say ""

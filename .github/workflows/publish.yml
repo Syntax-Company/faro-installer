@@ -1,0 +1,189 @@
+# Publica el sitio de get.faro.run: el instalador y el chart.
+#
+# ⚠️ QUÉ SIRVE CADA URL. El sitio de GitHub Pages de este repositorio publica cuatro cosas, y las
+# cuatro salen de aquí:
+#
+#   https://get.faro.run                     install.sh   (la raíz DEVUELVE EL SCRIPT, ver abajo)
+#   https://get.faro.run/install.sh          install.sh   (la misma URL, explícita)
+#   https://get.faro.run/index.yaml          el índice del repositorio Helm
+#   https://get.faro.run/faro-<version>.tgz  el chart empaquetado, una versión por release
+#
+# ⚠️ POR QUÉ LA RAÍZ ES `index.html` Y NO OTRA COSA. Pages sirve `index.html` como documento del
+# directorio, así que para que `curl -fsSL https://get.faro.run | bash` funcione sin ruta, el script
+# TIENE que publicarse con ese nombre. Se publica dos veces, byte a byte: como `index.html` (lo que
+# devuelve la raíz) y como `install.sh` (la URL explícita, y la que se cita en los mensajes de
+# error). Las dos copias las hace este workflow con un `cp`, así que no pueden divergir; editar
+# cualquiera de las dos a mano en la rama del sitio se pierde en la siguiente publicación.
+#
+# El `Content-Type` de la raíz será `text/html`, lo cual es mentira pero da igual: `curl | bash` no
+# lo mira. Un navegador que entre a get.faro.run verá el script en texto, que tampoco es mal
+# resultado para una URL cuyo único propósito es ejecutarse.
+#
+# ⚠️ POR QUÉ PAGES Y NO UN PAQUETE OCI EN ghcr.io. Las dos cosas sirven charts, y la de OCI es más
+# moderna. Se eligió Pages por tres razones concretas:
+#
+#   · Pages YA está en el camino crítico: la raíz tiene que servir el script sí o sí. Servir también
+#     el chart desde ahí es un despliegue, un DNS y una cosa que puede romperse, en vez de dos.
+#   · `helm` habla OCI solo desde la 3.8. Este instalador acepta cualquier Helm 3 (install.sh
+#     comprueba `v3.*`), y subir ese mínimo por el transporte del chart es un requisito nuevo a
+#     cambio de nada.
+#   · La visibilidad de un paquete de ghcr.io se administra por paquete y hay que ponerla en público
+#     a mano. Un chart que se publica privado por descuido pide credenciales al instalar — que es
+#     justo la clase de fallo que se acaba de quitar de en medio.
+#
+# Un `.tgz` sobre HTTPS, además, se descarga con el `curl` que el instalador ya exige, sin que haga
+# falta ni `helm registry login` ni `tar`.
+#
+# ── REQUISITO DE CONFIGURACIÓN (una vez, en el repositorio) ───────────────────────────────────
+#
+#   Settings → Pages → Source: "Deploy from a branch", rama `gh-pages`, carpeta `/ (root)`.
+#   Settings → Pages → Custom domain: get.faro.run  (y el CNAME de DNS apuntando a Pages).
+#
+#   El fichero CNAME lo reescribe este workflow en cada publicación, porque un `git push` sobre la
+#   rama del sitio que no lo lleve hace que Pages OLVIDE el dominio y get.faro.run deje de
+#   responder — es decir, rompe el `curl | bash` sin tocar nada del script.
+#
+#   La rama `gh-pages` tiene que existir antes de la primera ejecución (el checkout de una rama que
+#   no existe falla). Se crea vacía una sola vez:
+#
+#     git switch --orphan gh-pages
+#     git commit --allow-empty -m "sitio de get.faro.run"
+#     git push -u origin gh-pages
+#     git switch master
+
+name: publish
+
+on:
+  push:
+    # Un tag `chart-v0.1.0` publica `faro-0.1.0.tgz` Y republica el script.
+    tags:
+      - 'chart-v*'
+    # Un push a master republica SOLO el script, sin sacar versión del chart: son dos ciclos de vida
+    # distintos, y encadenarlos obligaría a versionar el chart para corregir una errata del
+    # instalador.
+    #
+    # ⚠️ El chart NO se publica por esta vía, y no es un descuido. Publicarlo en cada push
+    # sobreescribiría un `.tgz` que instalaciones reales ya han descargado, y «faro-0.1.0» dejaría
+    # de significar una cosa concreta.
+    #
+    # Sin filtro `paths`: aplicaría también a los pushes de tag y se saltaría la publicación de un
+    # chart cuyo tag no tocara install.sh. El último paso ya no hace nada si el sitio no cambia,
+    # que es la forma barata de conseguir lo mismo sin ese efecto de borde.
+    branches:
+      - master
+  workflow_dispatch:
+
+# Se escribe en la rama gh-pages.
+permissions:
+  contents: write
+
+# ⚠️ Dos publicaciones a la vez sobre la misma rama pierden una: la segunda hace `push` sobre un
+# índice que ya no es el que leyó. `cancel-in-progress: false` porque cancelar una publicación a
+# medias es peor que hacer cola.
+concurrency:
+  group: publish-site
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Código fuente
+        uses: actions/checkout@v4
+        with:
+          path: src
+
+      - name: Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      # ⚠️ LA COMPROBACIÓN QUE IMPIDE LA DIVERGENCIA. Tres sitios dicen qué versión es el chart:
+      # el tag de git, `Chart.yaml`, y la constante `CHART_VERSION_DEFAULT` del instalador — que es
+      # la que un `curl | bash` va a descargar. Si los tres no coinciden, el instalador publicado
+      # pide una versión que no existe (404 en mitad de la instalación) o, peor, una distinta de la
+      # que se acaba de sacar, y nadie se entera hasta que un cliente lo ejecuta.
+      #
+      # Es el mismo patrón que el resto del repositorio: cuando dos sitios tienen que decir lo
+      # mismo, algo lo comprueba en vez de confiar en que se acuerden.
+      - name: Las tres versiones tienen que coincidir
+        if: startsWith(github.ref, 'refs/tags/chart-v')
+        working-directory: src
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#chart-v}"
+          CHART_VERSION="$(sed -n 's/^version:[[:space:]]*//p' charts/faro/Chart.yaml | head -n1 | tr -d '"')"
+          SCRIPT_VERSION="$(sed -n 's/^CHART_VERSION_DEFAULT="\(.*\)"$/\1/p' install.sh)"
+
+          echo "tag              chart-v$TAG_VERSION"
+          echo "Chart.yaml       $CHART_VERSION"
+          echo "install.sh       $SCRIPT_VERSION"
+
+          if [ "$TAG_VERSION" != "$CHART_VERSION" ]; then
+            echo "::error::El tag dice $TAG_VERSION y charts/faro/Chart.yaml dice $CHART_VERSION."
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$SCRIPT_VERSION" ]; then
+            echo "::error::El tag dice $TAG_VERSION y CHART_VERSION_DEFAULT de install.sh dice $SCRIPT_VERSION. Un curl|bash descargaria la version equivocada."
+            exit 1
+          fi
+
+      - name: El chart tiene que ser válido
+        working-directory: src
+        run: helm lint charts/faro --strict
+
+      - name: Empaquetar el chart
+        if: startsWith(github.ref, 'refs/tags/chart-v')
+        run: helm package src/charts/faro --destination packaged
+
+      # La rama del sitio se trae ENTERA porque el índice de un repositorio Helm es acumulativo: hay
+      # que conservar los .tgz de todas las versiones anteriores. Una instalación que pinne
+      # `--chart-version 0.1.0` dentro de un año tiene que seguir encontrando ese fichero.
+      - name: Sitio publicado
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+
+      - name: Añadir el chart al índice
+        if: startsWith(github.ref, 'refs/tags/chart-v')
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#chart-v}"
+          if [ -f "site/faro-${VERSION}.tgz" ]; then
+            echo "::error::faro-${VERSION}.tgz ya esta publicado. Una version publicada no se reescribe: instalaciones reales la han descargado y 'faro-${VERSION}' tiene que seguir significando lo mismo. Saca una version nueva."
+            exit 1
+          fi
+          cp packaged/faro-*.tgz site/
+          # --merge conserva las entradas de las versiones anteriores; sin él, el índice se quedaría
+          # solo con lo que hay en el directorio y perdería el histórico de metadatos.
+          helm repo index site --url https://get.faro.run --merge site/index.yaml
+
+      - name: Publicar el instalador
+        run: |
+          set -euo pipefail
+          # Las dos copias salen del mismo fichero, en el mismo paso: no hay ventana en la que
+          # get.faro.run y get.faro.run/install.sh sirvan cosas distintas.
+          cp src/install.sh site/install.sh
+          cp src/install.sh site/index.html
+          chmod 0644 site/install.sh site/index.html
+          # Sin .nojekyll, Pages pasa el sitio por Jekyll, que se toma index.html como una plantilla
+          # e ignora ficheros que empiecen por `_`. Un script de shell no sobrevive a eso.
+          : > site/.nojekyll
+          # ⚠️ Sin este fichero, el push a gh-pages borra el dominio personalizado en Settings y
+          # get.faro.run deja de responder.
+          printf 'get.faro.run\n' > site/CNAME
+
+      - name: Subir el sitio
+        working-directory: site
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "El sitio no ha cambiado; no se publica nada."
+            exit 0
+          fi
+          git commit -m "publish: ${GITHUB_REF_NAME} (${GITHUB_SHA})"
+          git push origin gh-pages

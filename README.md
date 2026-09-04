@@ -78,11 +78,41 @@ mismo para todos los clusters que registres.
 ## Instalar
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Syntax-Company/faro-installer/master/install.sh | bash
+curl -fsSL https://get.faro.run | bash
 ```
 
 `install.sh` comprueba el cluster, pregunta lo poco que no puede saber, genera la llave maestra y el
-token de acceso inicial, y lanza Helm. Es el camino recomendado: **no hace falta leer `values.yaml`**.
+token de acceso inicial, se descarga el chart y lanza Helm. Es el camino recomendado: **no hace
+falta clonar nada ni leer `values.yaml`**.
+
+No pide credenciales en ningún momento. Los paquetes de las imágenes son públicos, y eso es
+justamente lo que permite que la instalación quepa en una orden: un instalador que a mitad te manda
+a GitHub a fabricarte un token no es una orden de una línea.
+
+### De dónde sale el chart
+
+El sitio de `get.faro.run` publica tres cosas:
+
+| URL | Qué |
+|---|---|
+| `https://get.faro.run` | el propio `install.sh` — es lo que ejecuta el `curl \| bash` |
+| `https://get.faro.run/index.yaml` | el índice del repositorio Helm: todas las versiones publicadas |
+| `https://get.faro.run/faro-<version>.tgz` | el chart empaquetado de esa versión |
+
+El instalador busca el chart en este orden: lo que le pases con `--chart`, el `charts/faro` que haya
+**junto al script** (repositorio clonado, para desarrollar), y si no hay ninguno, lo descarga.
+
+**La versión del chart se fija**, no se resuelve a «la última»: el script trae una constante y
+`--chart-version X.Y.Z` la sobreescribe. Una instalación tiene que poder decir qué instaló y
+repetirse igual dentro de un año, y con un puntero móvil eso no se puede. La versión usada queda
+escrita en el `faro-values.yaml` que deja en disco, junto con la orden exacta para actualizar.
+
+Para usarlo como repositorio Helm normal:
+
+```bash
+helm repo add faro https://get.faro.run
+helm search repo faro --versions
+```
 
 ### La instalación son dos momentos, no uno
 
@@ -91,7 +121,7 @@ sola mal escrita se descubría semanas después. Ahora:
 
 | | Dónde | Qué |
 |---|---|---|
-| **1. El instalador** | terminal, antes de que Faro exista | La conexión a Postgres, el dominio de Faro, las credenciales para bajar las imágenes, y los dos hechos del cluster que además detecta y te ofrece: IngressClass y ClusterIssuer |
+| **1. El instalador** | terminal, antes de que Faro exista | La conexión a Postgres, el dominio de Faro, y los dos hechos del cluster que además detecta y te ofrece: IngressClass y ClusterIssuer |
 | **2. El asistente** | en el navegador, dentro de Faro | El proveedor de identidad con sus credenciales, el registro donde Faro publica lo que construye, el repositorio de GitOps con su token, y el dominio base de las apps |
 
 El corte no es arbitrario: en el primer grupo está **lo que no puede venir de Faro porque Faro
@@ -109,8 +139,9 @@ ningún efecto: solo daría la impresión de haber configurado algo.
 ### Qué pregunta
 
 Dirección, usuario y contraseña de la base de datos —⚠️ **el nombre es siempre `faro`**, no se
-pregunta—, el dominio de Faro, la IngressClass, el ClusterIssuer, y el usuario y token de GitHub para
-bajar las imágenes.
+pregunta—, el dominio de Faro, la IngressClass y el ClusterIssuer.
+
+⚠️ **Ya no pide credenciales de descarga.** Los paquetes de las imágenes son públicos.
 
 Antes de preguntar nada comprueba que estén `kubectl` y `helm` 3, que haya conexión con un cluster
 ≥ 1.24 y que tengas permiso para crear namespaces. Si vas a desplegar la base de datos, comprueba
@@ -138,14 +169,14 @@ Kubernetes— que es lo único que hace falta para actualizar después:
 helm upgrade faro ./charts/faro -n faro -f faro-values.yaml
 ```
 
-Opciones útiles: `--dry-run` (pregunta y comprueba, no toca el cluster), `--namespace`, `--chart`
-para un chart local, `-y`. Toda pregunta se puede pre-responder con una variable de entorno del
-mismo nombre que el script imprime junto a la respuesta, lo que permite correrlo sin terminal:
+Opciones útiles: `--dry-run` (pregunta y comprueba, no toca el cluster), `--namespace`,
+`--chart-version` para fijar la versión del chart, `--chart` para uno local, `-y`. Toda pregunta se
+puede pre-responder con una variable de entorno del mismo nombre que el script imprime junto a la
+respuesta, lo que permite correrlo sin terminal:
 
 ```bash
 FARO_DOMAIN=faro.acme.com FARO_DB_MODE=desplegar \
-FARO_GHCR_USER=... FARO_GHCR_TOKEN=... \
-bash install.sh --yes
+curl -fsSL https://get.faro.run | bash -s -- --yes
 ```
 
 ⚠️ Si vuelves a ejecutarlo sobre una instalación existente, **ni la llave maestra ni el token se
@@ -176,9 +207,9 @@ cp example-values.yaml mis-values.yaml
 $EDITOR mis-values.yaml
 ```
 
-Ahí van la llave maestra, la contraseña de la base y las credenciales de descarga de ghcr.io. **El
-chart crea los dos Secrets** —el de arranque y el `dockerconfigjson`— con esos valores; no hay que
-hacer ningún `kubectl create secret` previo.
+Ahí van la llave maestra y la contraseña de la base. **El chart crea los Secrets** con esos valores;
+no hay que hacer ningún `kubectl create secret` previo. No hacen falta credenciales de descarga: los
+paquetes de las imágenes son públicos.
 
 > Esto era un tropiezo real: había que crearlos a mano antes, y olvidar cualquiera de los dos dejaba
 > la instalación a medias con un `CreateContainerConfigError` o un `ImagePullBackOff` que no menciona
@@ -237,7 +268,11 @@ causa.
 | `database.password` | Contraseña de la base | El default era `1234`, el del Postgres de desarrollo, y viajaba horneado en la imagen |
 | `database.host` (si `deploy=false`) | Dónde está la base | Sin default en el backend: la app no arranca |
 | `credentialKey.value` o `.existingSecret` | La llave maestra | Un default sería la **misma llave en todas las instalaciones**: el cifrado no protegería de nada |
-| `imagePullSecret.mode` | `create` \| `existing` \| `none` | Los paquetes son privados; sin secreto, `ImagePullBackOff` con un error que se lee como un tag mal escrito |
+
+`imagePullSecret` **ya no está en esta lista**: los paquetes de las imágenes son públicos, así que
+el default (`none`) vale para todo el mundo. Solo se toca si has replicado las imágenes en un
+registro propio que pida credenciales, y entonces con `mode: existing` apuntando a un Secret que
+crees tú.
 
 En un `helm upgrade` los tres secretos se pueden omitir: el chart recupera del cluster los que ya
 existen. Es lo que permite que el `faro-values.yaml` del instalador no lleve ninguno dentro.
@@ -393,8 +428,7 @@ helm upgrade faro ./charts/faro -n faro -f faro-values.yaml --set bootstrapToken
 
 ### Por qué van en un Secret aparte
 
-Los otros secretos —la contraseña de la base, las credenciales de descarga— se pueden volver a pedir
-a su fuente. Éstos no: la llave no se puede re-derivar, y el token es la única puerta mientras no
+El otro secreto —la contraseña de la base— se puede volver a pedir a su fuente. Éstos no: la llave no se puede re-derivar, y el token es la única puerta mientras no
 haya proveedor de identidad. Por eso este Secret lleva `resource-policy: keep` y el resto no.
 
 ### Qué respaldar
@@ -456,7 +490,7 @@ corriendo dentro**.
 
 | Síntoma | Causa habitual |
 |---|---|
-| `ImagePullBackOff` con `denied` | Falta el secreto de descarga, o su PAT no tiene `read:packages`. Los paquetes son privados |
+| `ImagePullBackOff` con `denied` | Los paquetes de Faro son públicos, así que no deberían pedir credenciales: mira si el tag existe (⚠️ va **sin** la `v`) o si el cluster sale por un proxy o un registry mirror |
 | Backend en `CrashLoopBackOff` desde el primer arranque | Falta la conexión a la base o la llave maestra. `kubectl logs` lo dice con una frase: el backend es fail-fast en eso |
 | Backend reinicia en bucle **sin** error de configuración | Flyway migrando en un arranque en frío. La `startupProbe` da 5 minutos; súbelos en `backend.startupProbe.failureThreshold` |
 | La pantalla de login dice "sin configurar" | Es lo normal antes del asistente: ya no hay proveedor de identidad en el arranque. Entra por `/setup` con el token de acceso inicial |

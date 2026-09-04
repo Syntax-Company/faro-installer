@@ -29,21 +29,17 @@ global:
 #   backend:  { tag: "0.0.0" }
 #   frontend: { tag: "0.0.0" }
 
-# Descarga de las imágenes DE FARO (no el registro donde Faro publica lo que construye: ése lo
-# configura el asistente). Los paquetes de ghcr.io/syntax-company son PRIVADOS.
+# Descarga de las imágenes DE FARO — ⚠️ NO HACE FALTA TOCAR NADA.
 #
-# El chart CREA el Secret con estas credenciales. Antes había que hacerlo a mano con
-# `kubectl create secret docker-registry`, y olvidarlo dejaba la instalación en ImagePullBackOff con
-# un `denied` que no menciona en ningún sitio el comando que falta.
-imagePullSecret:
-  mode: create
-  registry: ghcr.io
-  username: ""      # usuario de GitHub o bot de la organización
-  password: ""      # PAT clásico con scope read:packages
-  #
-  # Alternativa: créalo fuera y referéncialo, para que el PAT no viva en este archivo.
-  #   mode: existing
-  #   existingSecret: faro-ghcr
+# Los paquetes de ghcr.io/syntax-company son PÚBLICOS: el cluster se baja las imágenes sin
+# credenciales. Antes aquí iba un PAT de GitHub y el chart creaba un dockerconfigjson; se quitó
+# porque es lo que hace posible instalar con `curl -fsSL https://get.faro.run | bash`.
+#
+# Solo si has replicado las imágenes en un registro propio que pida credenciales:
+#
+#   imagePullSecret:
+#     mode: existing
+#     existingSecret: mi-registro   # Secret docker-registry creado por ti en el namespace de Faro
 
 ingress:
   # Sácala de `kubectl get ingressclass`. Vacío = la que esté marcada como default.

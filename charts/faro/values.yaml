@@ -67,25 +67,29 @@ images:
 # Secreto de descarga de las imágenes DE FARO (no el registro donde Faro publica lo que construye:
 # ése lo configura el asistente).
 #
-# ⚠️ Los paquetes de ghcr.io/syntax-company son PRIVADOS. Esto lo CREA el chart cuando se le dan las
-# credenciales — antes había que hacerlo a mano con `kubectl create secret docker-registry`, y
-# olvidarlo dejaba la instalación a medias con un ImagePullBackOff y un `denied` que no menciona en
-# ningún sitio el comando que falta.
+# ⚠️ NO HACE FALTA TOCAR NADA. Los paquetes de ghcr.io/syntax-company son PÚBLICOS: el cluster se
+# baja las imágenes sin credenciales.
 #
-# El bloque es condicional entero: o se crea y se referencia en los dos Deployments, o ninguna de
-# las dos cosas. Un Secret creado y no referenciado es peor que no tenerlo: parece configurado.
+# Antes esto era obligatorio y el chart creaba un dockerconfigjson con un PAT de GitHub. Se quitó
+# junto con la pregunta del instalador, y por una razón concreta: es lo que hace posible instalar
+# con `curl -fsSL https://get.faro.run | bash`. Una orden de una línea que a mitad te manda a la web
+# de GitHub a fabricarte un token no es una orden de una línea.
+#
+# Lo que queda es solo para quien haya replicado las imágenes en un registro propio que sí pida
+# credenciales. Ese Secret lo crea el operador; el chart únicamente lo referencia en los dos
+# Deployments.
 imagePullSecret:
-  # ⚠️ OBLIGATORIO. Uno de:
-  #   create   — el chart crea el Secret dockerconfigjson con las credenciales de abajo.
-  #   existing — ya existe un Secret en el namespace de Faro; se referencia por `existingSecret`.
-  #   none     — las imágenes están replicadas en un registro que el cluster lee sin credenciales.
-  mode: ""
+  # Uno de (vacío = none):
+  #   none     — las imágenes se leen sin credenciales. El caso normal.
+  #   existing — ya existe un Secret docker-registry en el namespace de Faro; se referencia por
+  #              `existingSecret`.
+  #
+  # ⚠️ Ya NO existe `create`: el chart no crea Secrets de descarga.
+  mode: none
+  # El Secret tiene que estar en el namespace de Faro y ser de tipo kubernetes.io/dockerconfigjson:
+  #   kubectl create secret docker-registry mi-registro -n faro \
+  #     --docker-server=registry.interno --docker-username=<u> --docker-password=<p>
   existingSecret: ""
-  registry: ghcr.io
-  # Usuario de GitHub (o el bot/cuenta de servicio de la organización).
-  username: ""
-  # PAT clásico con el scope `read:packages`.
-  password: ""
 
 # ---------------------------------------------------------------------------------------------
 # Ingress — el host único

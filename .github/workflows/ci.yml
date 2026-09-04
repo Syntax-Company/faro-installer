@@ -1,0 +1,84 @@
+# Comprobaciones en cada cambio. Nada de esto toca un cluster ni publica nada.
+#
+# El objetivo es que los errores que este repositorio no puede permitirse salgan en el pull request
+# y no en la terminal de un cliente a mitad de un `curl | bash`.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      # El instalador se ejecuta con `curl | bash` en la máquina de otra persona: un error de
+      # sintaxis no se descubre «al probarlo», se descubre a medio instalar.
+      - name: install.sh parsea
+        run: bash -n install.sh
+
+      # Informativo: no tumba el build. Está para que las advertencias se vean en el log de cada PR,
+      # no para bloquear a nadie por una comilla que shellcheck prefiere de otra forma.
+      - name: shellcheck (informativo)
+        continue-on-error: true
+        run: shellcheck --severity=warning install.sh
+
+      - name: El chart es válido
+        run: helm lint charts/faro --strict
+
+      # ⚠️ LA COMPROBACIÓN QUE IMPORTA. `CHART_VERSION_DEFAULT` es la versión que un `curl | bash`
+      # va a descargar de get.faro.run; `Chart.yaml` es la que se publicará con ese nombre. Si se
+      # separan, el instalador publicado pide un `.tgz` que no existe y la instalación muere con un
+      # 404 en mitad. Publicar ya lo comprueba (publish.yml), pero entonces es tarde: el pull
+      # request que las separó ya está en master. Aquí sale donde se causó.
+      - name: install.sh y Chart.yaml dicen la misma versión de chart
+        run: |
+          set -euo pipefail
+          CHART_VERSION="$(sed -n 's/^version:[[:space:]]*//p' charts/faro/Chart.yaml | head -n1 | tr -d '"')"
+          SCRIPT_VERSION="$(sed -n 's/^CHART_VERSION_DEFAULT="\(.*\)"$/\1/p' install.sh)"
+          echo "Chart.yaml  $CHART_VERSION"
+          echo "install.sh  $SCRIPT_VERSION"
+          [ -n "$SCRIPT_VERSION" ] || { echo "::error::No se pudo leer CHART_VERSION_DEFAULT de install.sh"; exit 1; }
+          if [ "$CHART_VERSION" != "$SCRIPT_VERSION" ]; then
+            echo "::error::charts/faro/Chart.yaml dice $CHART_VERSION y CHART_VERSION_DEFAULT de install.sh dice $SCRIPT_VERSION. Al sacar version hay que tocar los dos."
+            exit 1
+          fi
+
+      # Renderizar el chart con lo que el instalador pasa de verdad. `helm lint` valida el chart en
+      # abstracto; esto comprueba que la combinación concreta que produce install.sh sale.
+      #
+      # ⚠️ Los dos secretos van con su FORMA canónica a propósito: el chart la valida
+      # (secret-bootstrap.yaml) y un cambio que rompa esa validación tiene que salir aquí.
+      #
+      # Son valores de relleno evidentes —todo ceros, todo aes— y no pueden ser otra cosa: cualquier
+      # secreto de verdad que se pegara aquí quedaría publicado en el repositorio para siempre. Lo
+      # único que se comprueba es la forma, así que un valor tonto sirve igual.
+      #
+      # Van por fichero y no por `--set`: el valor de la llave acaba en '=' y el parser de `--set`
+      # trata el '=' como separador.
+      - name: Renderiza con los values del instalador
+        run: |
+          cat > /tmp/ci-values.yaml <<'YAML'
+          global:
+            domain: faro.example.com
+          database:
+            deploy: true
+            password: "contrasena-de-relleno"
+          credentialKey:
+            value: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          bootstrapToken:
+            value: "0000000000000000000000000000000000000000"
+          YAML
+          helm template faro charts/faro --namespace faro -f /tmp/ci-values.yaml > /dev/null

@@ -143,23 +143,31 @@ app a propósito — lleva `resource-policy: keep` porque su contenido no se pue
 {{- end -}}
 
 {{/*
-Nombre del imagePullSecret que montan los DOS Deployments, o cadena vacía con mode=none.
+Nombre del imagePullSecret que montan los DOS Deployments, o cadena vacía (el caso normal).
 
-Los paquetes de ghcr.io/syntax-company son privados: sin esto el pod se queda en ImagePullBackOff
-con un `denied` del registry, que se lee como un tag equivocado y no como credenciales que faltan.
+⚠️ Los paquetes de las imágenes de Faro son PÚBLICOS: el cluster se las baja sin credenciales y aquí
+no hace falta nada. Por eso el default es `none` y no hay pregunta que hacer — es lo que permite que
+la instalación entera quepa en `curl -fsSL https://get.faro.run | bash`, sin mandar a nadie a
+fabricarse un token a mitad de la orden.
+
+El chart ya NO crea ningún Secret de descarga (antes había un `mode: create` que montaba un
+dockerconfigjson con un PAT). Queda solo `existing`, para quien haya replicado las imágenes en un
+registro propio que sí pida credenciales: ese Secret lo crea el operador y el chart únicamente lo
+referencia.
+
+    kubectl create secret docker-registry mi-registro -n faro \
+      --docker-server=registry.interno --docker-username=<u> --docker-password=<p>
 
 Devuelve solo el NOMBRE (y no el bloque `imagePullSecrets:` entero) para que el call site controle
-la indentación sin pelearse con `nindent` sobre un bloque que a veces está vacío. La validación de
-`mode` corre igual en los tres casos, porque `include` ejecuta esta plantilla siempre.
+la indentación sin pelearse con `nindent` sobre un bloque que casi siempre está vacío. La validación
+de `mode` corre igual en los dos casos, porque `include` ejecuta esta plantilla siempre.
 */}}
 {{- define "faro.imagePullSecretName" -}}
-{{- $mode := required "imagePullSecret.mode es OBLIGATORIO: create | existing | none. Las imagenes de Faro estan en paquetes PRIVADOS de ghcr.io, asi que sin secreto de descarga los dos Deployments quedan en ImagePullBackOff con un 'denied' que parece un tag mal escrito. Usa 'none' solo si has replicado las imagenes en un registry que el cluster lee sin credenciales." .Values.imagePullSecret.mode -}}
-{{- if eq $mode "create" -}}
-{{- printf "%s-registry" (include "faro.fullname" .) -}}
-{{- else if eq $mode "existing" -}}
-{{- required "imagePullSecret.existingSecret es OBLIGATORIO con imagePullSecret.mode=existing." .Values.imagePullSecret.existingSecret -}}
+{{- $mode := .Values.imagePullSecret.mode | default "none" -}}
+{{- if eq $mode "existing" -}}
+{{- required "imagePullSecret.existingSecret es OBLIGATORIO con imagePullSecret.mode=existing: el nombre del Secret docker-registry que hayas creado tu en el namespace de Faro." .Values.imagePullSecret.existingSecret -}}
 {{- else if ne $mode "none" -}}
-{{- fail (printf "imagePullSecret.mode invalido: %q. Valores admitidos: create | existing | none." $mode) -}}
+{{- fail (printf "imagePullSecret.mode invalido: %q. Valores admitidos: existing | none (vacio = none). Las imagenes de Faro son publicas, asi que el caso normal es no poner nada. 'create' ya no existe: el chart no crea Secrets de descarga." $mode) -}}
 {{- end -}}
 {{- end -}}
 

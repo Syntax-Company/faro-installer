@@ -31,13 +31,10 @@
       "properties": {
         "mode": {
           "type": "string",
-          "enum": ["", "create", "existing", "none"],
-          "description": "create | existing | none. Los paquetes de ghcr.io/syntax-company son privados."
+          "enum": ["", "existing", "none"],
+          "description": "existing | none (vacio = none). Las imagenes de Faro estan en paquetes PUBLICOS, asi que el caso normal es no tocar nada. 'create' se elimino: el chart ya no crea Secrets de descarga."
         },
-        "existingSecret": { "type": "string" },
-        "registry": { "type": "string" },
-        "username": { "type": "string" },
-        "password": { "type": "string" }
+        "existingSecret": { "type": "string" }
       }
     },
 

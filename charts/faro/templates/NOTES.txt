@@ -106,10 +106,12 @@
      Role/RoleBinding de builds se aplicaron dentro. Si existe con otro nombre
      del que lee el backend, el primer build fallará con un 403.
 {{- end }}
-{{- if eq .Values.imagePullSecret.mode "none" }}
+{{- if eq (.Values.imagePullSecret.mode | default "none") "existing" }}
 
-  ℹ️ imagePullSecret.mode=none. Si los pods quedan en ImagePullBackOff con
-     "denied", es esto: los paquetes de ghcr.io/syntax-company son privados.
+  ℹ️ imagePullSecret.mode=existing — los pods descargan con el Secret
+     "{{ .Values.imagePullSecret.existingSecret }}". Si quedan en ImagePullBackOff con "denied",
+     mira ahí: los paquetes públicos de Faro no necesitan credenciales, así que
+     esto solo aplica si has replicado las imágenes en un registro propio.
 {{- end }}
 
   ⚠️ CADA CLUSTER DE WORKLOAD NECESITA ARGO CD Y ARGO ROLLOUTS.
